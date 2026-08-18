@@ -116,6 +116,20 @@ func TestRotatedTokenSurvivesReload(t *testing.T) {
 	}
 }
 
+func TestLoadAccessTokensFromEnvironment(t *testing.T) {
+	chdirTemp(t)
+	t.Setenv("ACCESS_TOKEN", "env-access-token")
+	t.Setenv("ACCESS_TEAM_ID", "team-env")
+
+	loaded := loadAccessTokens()
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 token, got %d", len(loaded))
+	}
+	if loaded[0].Token != "env-access-token" || loaded[0].TeamID != "team-env" {
+		t.Fatalf("unexpected env token: %#v", loaded[0])
+	}
+}
+
 func TestLoadSessionTokensFromEnvironment(t *testing.T) {
 	t.Setenv("SESSION_TOKEN_FILE", filepath.Join(t.TempDir(), "missing-session-tokens.txt"))
 	t.Setenv("SESSION_TOKEN", "env-session-token")

@@ -49,8 +49,8 @@ func Init() (*App, error) {
 	// 去重 key: chatgpt_account_id (for free/puid) 或 token (for noauth/refresh)
 	seen := make(map[string]bool)
 
-	// 1. access_tokens.txt — 纯 access token，不可续期
-	for _, t := range accounts.LoadTokensFromFile("access_tokens.txt") {
+	// 1. access_tokens.txt / ACCESS_TOKEN — 纯 access token，不可续期
+	for _, t := range loadAccessTokens() {
 		// 从 access_token JWT 解析 chatgpt_account_id 用于去重
 		chatGPTID := accounts.ExtractChatGPTAccountID(t.Token)
 		key := "access:" + chatGPTID
@@ -253,6 +253,21 @@ func sessionTokenFilePath() string {
 		return path
 	}
 	return "session_tokens.txt"
+}
+
+func loadAccessTokens() []accounts.RawToken {
+	tokens := accounts.LoadTokensFromFile("access_tokens.txt")
+	envToken := strings.TrimSpace(os.Getenv("ACCESS_TOKEN"))
+	if envToken == "" {
+		return tokens
+	}
+	envTeamID := strings.TrimSpace(os.Getenv("ACCESS_TEAM_ID"))
+	for _, t := range tokens {
+		if t.Token == envToken {
+			return tokens
+		}
+	}
+	return append(tokens, accounts.RawToken{Token: envToken, TeamID: envTeamID})
 }
 
 func loadSessionTokens() []accounts.RawToken {
