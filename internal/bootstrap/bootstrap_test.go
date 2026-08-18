@@ -116,6 +116,36 @@ func TestRotatedTokenSurvivesReload(t *testing.T) {
 	}
 }
 
+func TestLoadSessionTokensFromEnvironment(t *testing.T) {
+	t.Setenv("SESSION_TOKEN_FILE", filepath.Join(t.TempDir(), "missing-session-tokens.txt"))
+	t.Setenv("SESSION_TOKEN", "env-session-token")
+	t.Setenv("SESSION_TEAM_ID", "team-env")
+
+	loaded := loadSessionTokens()
+	if len(loaded) != 1 {
+		t.Fatalf("expected 1 token, got %d", len(loaded))
+	}
+	if loaded[0].Token != "env-session-token" || loaded[0].TeamID != "team-env" {
+		t.Fatalf("unexpected env token: %#v", loaded[0])
+	}
+}
+
+func TestPersistRotatedSessionTokenUsesConfiguredPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "rotated.txt")
+	t.Setenv("SESSION_TOKEN_FILE", path)
+
+	persistRotatedSessionToken("old", "rotated", "team-a")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), "rotated:team-a\n"; got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
 func TestExchangeSessionTokenNoopWithoutToken(t *testing.T) {
 	acct := &accounts.Account{}
 	if exchangeSessionToken(acct) {

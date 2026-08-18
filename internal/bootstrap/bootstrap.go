@@ -93,7 +93,7 @@ func Init() (*App, error) {
 	}
 
 	// 3. session_tokens.txt — ChatGPT session token，用于免费账号续期
-	for _, t := range accounts.LoadTokensFromFile("session_tokens.txt") {
+	for _, t := range loadSessionTokens() {
 		key := "session:" + t.Token
 		if seen[key] {
 			continue
@@ -248,11 +248,33 @@ func exchangeSessionToken(acct *accounts.Account) bool {
 // sessionTokenFileMu 保护 session_tokens.txt 的读-改-写，避免并发续期互相覆盖。
 var sessionTokenFileMu sync.Mutex
 
+func sessionTokenFilePath() string {
+	if path := strings.TrimSpace(os.Getenv("SESSION_TOKEN_FILE")); path != "" {
+		return path
+	}
+	return "session_tokens.txt"
+}
+
+func loadSessionTokens() []accounts.RawToken {
+	tokens := accounts.LoadTokensFromFile(sessionTokenFilePath())
+	envToken := strings.TrimSpace(os.Getenv("SESSION_TOKEN"))
+	if envToken == "" {
+		return tokens
+	}
+	envTeamID := strings.TrimSpace(os.Getenv("SESSION_TEAM_ID"))
+	for _, t := range tokens {
+		if t.Token == envToken {
+			return tokens
+		}
+	}
+	return append(tokens, accounts.RawToken{Token: envToken, TeamID: envTeamID})
+}
+
 // persistRotatedSessionToken 将轮换得到的新 session token 写回 session_tokens.txt，
 // 只替换旧令牌所在行，保留其它账号的行；文件不存在时直接写入。
 // 写入经临时文件 + rename，避免中途失败把整个凭据文件截断。
 func persistRotatedSessionToken(oldToken, newToken, teamID string) {
-	const path = "session_tokens.txt"
+	path := sessionTokenFilePath()
 
 	value := newToken
 	if teamID != "" {
