@@ -179,7 +179,7 @@ func ExtractWorkingDir(messages []official.APIMessage) string {
 //   - tool   : 提醒把 tool 输出当 ground truth,继续调用或总结
 //   - user   : 强制模型立刻发 <tool_call>(不思考、不描述环境)
 //   - 其他   : 返回空
-func FinalNudge(tools []official.Tool, messages []official.APIMessage) string {
+func FinalNudge(tools []official.Tool, messages []official.APIMessage, toolChoice *official.ToolChoice) string {
 	if len(tools) == 0 || len(messages) == 0 {
 		return ""
 	}
@@ -189,6 +189,10 @@ func FinalNudge(tools []official.Tool, messages []official.APIMessage) string {
 		// 拿不到具体的 tool 名(API 没有 tool_call_id 映射),用一个通用表达
 		return "\n[SYSTEM INSTRUCTION: The 'Tool (...)' block above is the REAL output produced by running your tool call on the user's actual machine. Treat it as ground truth and as the current state of the workspace. Continue the task based strictly on it: call another tool using the exact <tool_call>{...}</tool_call> format if you need more information, or give your final answer. NEVER claim a directory or file does not exist, or that you are in a different/isolated environment, when it appears in the output above.]"
 	case "user":
+		forced := toolChoice != nil && (toolChoice.Type == "any" || toolChoice.ForcedFunctionName() != "")
+		if !forced {
+			return ""
+		}
 		wd := ExtractWorkingDir(messages)
 		example := FirstToolCallExample(tools, wd)
 		wdPart := ""

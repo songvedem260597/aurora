@@ -90,6 +90,7 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 
 	// 工具调用模式判定
 	toolsEnabled := toolCallingEnabled(original_request.Tools, h.cfg)
+	toolStreamRequested := original_request.Stream
 	if toolsEnabled && h.cfg.StreamMode {
 		original_request.Stream = false
 	}
@@ -115,7 +116,7 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 
 	// 工具调用提前分支
 	if toolsEnabled {
-		h.handleToolCalling(c, &original_request, &client, account, &clientState, &reqModel, &uid, &proxyUrl, &input_tokens)
+		h.handleToolCalling(c, &original_request, &client, account, &clientState, &reqModel, &uid, &proxyUrl, &input_tokens, toolStreamRequested)
 		return
 	}
 
@@ -659,7 +660,7 @@ func (h *ChatHandler) Files(c *gin.Context) {
 }
 
 // handleToolCalling 工具调用模式的主流程（对齐 initialize/handlers.go:handleToolCalling）
-func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officialtypes.APIRequest, client **bogdanfinn.TlsClient, account *accounts.Account, clientState **chatgpt.ChatClientState, reqModel *string, uid *string, proxyUrl *string, inputTokens *int) {
+func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officialtypes.APIRequest, client **bogdanfinn.TlsClient, account *accounts.Account, clientState **chatgpt.ChatClientState, reqModel *string, uid *string, proxyUrl *string, inputTokens *int, streamRequested bool) {
 	if account == nil || !account.Type.Satisfies(accounts.CapToolCalling) {
 		c.JSON(403, gin.H{"error": "Tool calling requires a logged-in ChatGPT account."})
 		return
@@ -747,6 +748,10 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	}
 
 	if len(lastToolCalls) > 0 {
+		if streamRequested {
+			writeToolCallingSSE(c, "", lastToolCalls, *reqModel, lastConversationID)
+			return
+		}
 		c.JSON(200, officialtypes.NewChatCompletionWithToolCalls(
 			lastText, "", lastToolCalls,
 			*inputTokens, util.CountToken(lastText),
@@ -755,7 +760,59 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		return
 	}
 	outputTokens := util.CountToken(lastText)
+	if streamRequested {
+		writeToolCallingSSE(c, lastText, nil, *reqModel, lastConversationID)
+		return
+	}
 	c.JSON(200, officialtypes.NewChatCompletionWithMetadata(lastText, *inputTokens, outputTokens, *reqModel, lastConversationID, lastSentinel))
+}
+
+func writeToolCallingSSE(c *gin.Context, text string, calls []officialtypes.ToolCall, model, conversationID string) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+
+	roleChunk := officialtypes.ChatCompletionChunk{
+		ID:      "chatcmpl-QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
+		Object:  "chat.completion.chunk",
+		Created: 0,
+		Model:   model,
+		Choices: []officialtypes.Choices{{
+			Index: 0,
+			Delta: officialtypes.Delta{Role: "assistant"},
+		}},
+	}
+	c.Writer.WriteString("data: " + roleChunk.String() + "\n\n")
+
+	if len(calls) > 0 {
+		deltas := make([]officialtypes.ToolCallDelta, 0, len(calls))
+		for _, call := range calls {
+			deltas = append(deltas, officialtypes.ToolCallDelta{
+				Index: call.Index,
+				ID:    call.ID,
+				Type:  call.Type,
+				Function: officialtypes.ToolCallFuncDelta{
+					Name:      call.Function.Name,
+					Arguments: call.Function.Arguments,
+				},
+			})
+		}
+		chunk := officialtypes.NewToolCallChunk(model, deltas...)
+		c.Writer.WriteString("data: " + chunk.String() + "\n\n")
+		stop := officialtypes.NewToolCallStopChunk(model, conversationID)
+		c.Writer.WriteString("data: " + stop.String() + "\n\n")
+	} else {
+		if text != "" {
+			chunk := officialtypes.NewChatCompletionChunk(text, model)
+			c.Writer.WriteString("data: " + chunk.String() + "\n\n")
+		}
+		stop := officialtypes.StopChunkWithConversation("stop", model, conversationID)
+		c.Writer.WriteString("data: " + stop.String() + "\n\n")
+	}
+
+	c.Writer.WriteString("data: [DONE]\n\n")
+	c.Writer.Flush()
 }
 
 func (h *ChatHandler) ChatGPTConversation(c *gin.Context) {

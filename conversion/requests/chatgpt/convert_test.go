@@ -93,7 +93,7 @@ func TestConvertAPIRequestInjectsToolInstructions(t *testing.T) {
 	}
 }
 
-func TestConvertAPIRequestAppendsFinalNudgeForUserTurn(t *testing.T) {
+func TestConvertAPIRequestDoesNotForceFinalNudgeForAutoUserTurn(t *testing.T) {
 	req := official.APIRequest{
 		Model: "gpt-5",
 		Tools: []official.Tool{
@@ -106,14 +106,14 @@ func TestConvertAPIRequestAppendsFinalNudgeForUserTurn(t *testing.T) {
 	out := testConvert(t, req)
 	last := out.Messages[len(out.Messages)-1]
 	if last.Author.Role != "user" {
-		t.Fatalf("last role = %q, want user (nudge)", last.Author.Role)
+		t.Fatalf("last role = %q, want user", last.Author.Role)
 	}
 	lastText, _ := last.Content.Parts[0].(string)
-	if !strings.Contains(lastText, "READ CAREFULLY") {
-		t.Fatalf("nudge missing READ CAREFULLY: %s", lastText)
+	if strings.Contains(lastText, "READ CAREFULLY") {
+		t.Fatalf("auto tool choice unexpectedly forced a tool call: %s", lastText)
 	}
-	if !strings.Contains(lastText, "working directory: /home/x") {
-		t.Fatalf("nudge missing wd: %s", lastText)
+	if lastText != "Working directory: /home/x\nlist" {
+		t.Fatalf("last user message changed unexpectedly: %q", lastText)
 	}
 }
 

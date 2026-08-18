@@ -415,7 +415,7 @@ func TestFinalNudgeForToolResult(t *testing.T) {
 		{Role: "assistant", Content: official.MessageContent{TextValue: ""}},
 		{Role: "tool", Content: official.MessageContent{TextValue: "file1\nfile2"}},
 	}
-	got := FinalNudge(tools, msgs)
+	got := FinalNudge(tools, msgs, nil)
 	if got == "" {
 		t.Fatalf("got empty nudge")
 	}
@@ -431,15 +431,23 @@ func TestFinalNudgeForUserTurn(t *testing.T) {
 	msgs := []official.APIMessage{
 		{Role: "user", Content: official.MessageContent{TextValue: "Working directory: /home/x\n列出文件"}},
 	}
-	got := FinalNudge(tools, msgs)
-	if got == "" {
-		t.Fatalf("got empty")
+	got := FinalNudge(tools, msgs, nil)
+	if got != "" {
+		t.Fatalf("auto tool choice should not force a tool call: %s", got)
 	}
-	if !strings.Contains(got, "working directory: /home/x") {
-		t.Fatalf("missing wd: %s", got)
+}
+
+func TestFinalNudgeForForcedAnyUserTurn(t *testing.T) {
+	tools := []official.Tool{
+		{Type: "function", Function: official.ToolFunction{Name: "bash"}},
 	}
-	if !strings.Contains(got, `"bash"`) {
-		t.Fatalf("missing example: %s", got)
+	msgs := []official.APIMessage{
+		{Role: "user", Content: official.MessageContent{TextValue: "Working directory: /home/x\n列出文件"}},
+	}
+	choice := &official.ToolChoice{Type: "any"}
+	got := FinalNudge(tools, msgs, choice)
+	if got == "" || !strings.Contains(got, `"bash"`) {
+		t.Fatalf("forced-any should include a tool-call nudge: %s", got)
 	}
 }
 
@@ -450,7 +458,7 @@ func TestFinalNudgeEmptyForOtherRole(t *testing.T) {
 	msgs := []official.APIMessage{
 		{Role: "assistant", Content: official.MessageContent{TextValue: "hi"}},
 	}
-	if got := FinalNudge(tools, msgs); got != "" {
+	if got := FinalNudge(tools, msgs, nil); got != "" {
 		t.Fatalf("got = %q, want empty for non-tool/user last role", got)
 	}
 }

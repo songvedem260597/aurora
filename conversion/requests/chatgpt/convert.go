@@ -147,7 +147,7 @@ func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.
 
 	// 末尾追加 FinalNudge(取决于最后一条消息的角色),仅在启用工具调用时
 	if hasTools {
-		nudge := toolcall.FinalNudge(api_request.Tools, api_request.Messages)
+		nudge := toolcall.FinalNudge(api_request.Tools, api_request.Messages, api_request.ToolChoice)
 		if nudge != "" {
 			chatgpt_request.AddMessage("user", nudge)
 		}
