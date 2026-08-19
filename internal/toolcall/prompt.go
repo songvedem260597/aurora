@@ -44,6 +44,8 @@ func BuildInstructions(tools []official.Tool, toolChoice *official.ToolChoice) s
 		fmt.Fprintf(&sb, "\nCRITICAL: You MUST call the tool %q in this response. Do not call any other tool, and do not produce a final answer without calling it first.\n", forced)
 	} else if toolChoice != nil && toolChoice.IsForcedNone() {
 		sb.WriteString("\nCRITICAL: The user has DISABLED tool calling in this request. Do not emit any <tool_call> blocks. Just answer in plain text.\n")
+	} else if toolChoice != nil && toolChoice.RequiresCall() {
+		sb.WriteString("\nCRITICAL: You MUST call at least one available tool in this response. Do not produce a final answer before calling a tool.\n")
 	}
 	return sb.String()
 }
@@ -210,7 +212,7 @@ func FinalNudge(tools []official.Tool, messages []official.APIMessage, toolChoic
 		// 拿不到具体的 tool 名(API 没有 tool_call_id 映射),用一个通用表达
 		return "\n[SYSTEM INSTRUCTION: The 'Tool (...)' block above is the REAL output produced by running your tool call on the user's actual machine. Treat it as ground truth and as the current state of the workspace. Continue the task based strictly on it: call another tool using the exact <tool_call>{...}</tool_call> format if you need more information, or give your final answer. NEVER claim a directory or file does not exist, or that you are in a different/isolated environment, when it appears in the output above.]"
 	case "user":
-		forced := toolChoice != nil && (toolChoice.Type == "any" || toolChoice.ForcedFunctionName() != "")
+		forced := toolChoice != nil && toolChoice.RequiresCall()
 		if !forced {
 			return ""
 		}

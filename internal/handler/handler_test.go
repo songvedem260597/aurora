@@ -79,6 +79,21 @@ func TestToolCallingEnabledFromConfig(t *testing.T) {
 	}
 }
 
+func TestRequestToolCallingEnabledHonorsNone(t *testing.T) {
+	cfg := &config.Config{ToolCallingEnabled: true}
+	req := &officialtypes.APIRequest{
+		Tools:      []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		ToolChoice: &officialtypes.ToolChoice{Type: "none"},
+	}
+	if requestToolCallingEnabled(req, cfg) {
+		t.Fatal("tool_choice=none must bypass tool mode even when tools are present")
+	}
+	req.ToolChoice = &officialtypes.ToolChoice{Type: "auto"}
+	if !requestToolCallingEnabled(req, cfg) {
+		t.Fatal("tool_choice=auto with tools must keep tool mode enabled")
+	}
+}
+
 func TestShouldRequireToolCallForDeferredWorkspaceAction(t *testing.T) {
 	req := &officialtypes.APIRequest{
 		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
@@ -166,6 +181,41 @@ func TestDeferredResponseDetectionDoesNotDependOnActionVerbList(t *testing.T) {
 	}
 }
 
+func TestParseAgentIntentStripsInternalMarker(t *testing.T) {
+	intent, clean := parseAgentIntent("<agent_intent>action</agent_intent>Đã cập nhật file.")
+	if intent != agentIntentAction {
+		t.Fatalf("intent = %q, want action", intent)
+	}
+	if clean != "Đã cập nhật file." {
+		t.Fatalf("clean text = %q", clean)
+	}
+
+	intent, clean = parseAgentIntent("<agent_intent>answer</agent_intent>Closure giữ lexical scope.")
+	if intent != agentIntentAnswer || clean != "Closure giữ lexical scope." {
+		t.Fatalf("answer marker parse = (%q, %q)", intent, clean)
+	}
+}
+
+func TestAgentIntentRequiresToolWithoutActionKeywords(t *testing.T) {
+	messages := []officialtypes.APIMessage{{
+		Role:    "user",
+		Content: officialtypes.MessageContent{TextValue: "cho nó giống cái bên trái hơn một chút"},
+	}}
+	if !agentIntentRequiresTool(agentIntentAction, messages) {
+		t.Fatal("semantic action intent must require a tool without relying on verb keywords")
+	}
+	if agentIntentRequiresTool(agentIntentAnswer, messages) {
+		t.Fatal("semantic answer intent must remain a normal text turn")
+	}
+
+	call := officialtypes.ToolCallRef{ID: "call_edit", Type: "function"}
+	call.Function.Name = "edit"
+	messages = append(messages, officialtypes.APIMessage{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{call}})
+	if agentIntentRequiresTool(agentIntentAction, messages) {
+		t.Fatal("an action intent must not force a duplicate tool after one already ran")
+	}
+}
+
 func TestImplicitContentFollowupInheritsGateAfterModelChoosesTool(t *testing.T) {
 	readCall := officialtypes.ToolCallRef{ID: "call_read", Type: "function"}
 	readCall.Function.Name = "read"
@@ -222,6 +272,46 @@ func TestConversationRequestsActionDoesNotForceExplanation(t *testing.T) {
 	}
 }
 
+func TestDeferredResponseRequiresToolForImplicitContentFollowup(t *testing.T) {
+	messages := []officialtypes.APIMessage{
+		{Role: "user", Content: officialtypes.MessageContent{TextValue: "tạo game bắn máy bay pixel bằng html trên desktop"}},
+		{Role: "assistant", Content: officialtypes.MessageContent{TextValue: "Đã tạo game."}},
+		{Role: "user", Content: officialtypes.MessageContent{TextValue: "bay theo chiều dọc á với có nhạc nữa"}},
+	}
+
+	if !deferredResponseRequiresTool(messages) {
+		t.Fatal("implicit follow-up to an earlier game task must require a real tool turn")
+	}
+}
+
+func TestDeferredResponseRequiresToolInheritsSuccessfulMutation(t *testing.T) {
+	writeCall := officialtypes.ToolCallRef{ID: "call_write", Type: "function"}
+	writeCall.Function.Name = "apply_patch"
+	writeCall.Function.Arguments = `{"patchText":"*** Begin Patch"}`
+	messages := []officialtypes.APIMessage{
+		{Role: "user", Content: officialtypes.MessageContent{TextValue: "làm cái đó đi"}},
+		{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{writeCall}},
+		{Role: "tool", ToolCallID: "call_write", Content: officialtypes.MessageContent{TextValue: "Done!"}},
+		{Role: "assistant", Content: officialtypes.MessageContent{TextValue: "Đã cập nhật."}},
+		{Role: "user", Content: officialtypes.MessageContent{TextValue: "cho nhanh hơn chút nữa"}},
+	}
+
+	if !deferredResponseRequiresTool(messages) {
+		t.Fatal("a terse follow-up must inherit a prior successful workspace mutation")
+	}
+}
+
+func TestDeferredResponseRequiresToolAllowsPureExplanation(t *testing.T) {
+	messages := []officialtypes.APIMessage{{
+		Role:    "user",
+		Content: officialtypes.MessageContent{TextValue: "giải thích closure là gì"},
+	}}
+
+	if deferredResponseRequiresTool(messages) {
+		t.Fatal("pure explanation must not be escalated into a mandatory tool turn")
+	}
+}
+
 func TestConversationRequestsActionAfterOpenAIJSONRoundTrip(t *testing.T) {
 	body := `{"model":"gpt-5-6-thinking","messages":[{"role":"assistant","content":"Tao sẽ sửa handler rồi chạy test để xác nhận."},{"role":"user","content":"ok"}],"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]}`
 	var req officialtypes.APIRequest
@@ -247,6 +337,27 @@ func TestToolResultAllowsFollowupAnswer(t *testing.T) {
 	}
 	if shouldRequireToolCall(req, "") {
 		t.Fatal("a completed tool result must allow the model to answer instead of forcing another tool call")
+	}
+}
+
+func TestNegativeMutationConstraintDoesNotForceExtraTool(t *testing.T) {
+	call := officialtypes.ToolCallRef{ID: "call_pwd", Type: "function"}
+	call.Function.Name = "bash"
+	call.Function.Arguments = `{"command":"pwd"}`
+	req := &officialtypes.APIRequest{
+		Tools:      []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		ToolChoice: &officialtypes.ToolChoice{Type: "auto"},
+		Messages: []officialtypes.APIMessage{
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "You must use the bash tool to run pwd. Report its output and do not modify any files."}},
+			{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{call}},
+			{Role: "tool", ToolCallID: "call_pwd", Name: "bash", Content: officialtypes.MessageContent{TextValue: `C:\work`}},
+		},
+	}
+	if conversationRequestsMutation(req.Messages) {
+		t.Fatal("a negated mutation constraint must not be classified as a mutation request")
+	}
+	if shouldRequireToolCall(req, "") {
+		t.Fatal("a completed pwd call must allow the final answer")
 	}
 }
 
@@ -439,7 +550,12 @@ func TestWriteToolCallingSSEMatches9RouterStreamingShape(t *testing.T) {
 		},
 	}}
 
-	writeToolCallingSSE(c, "", calls, "gpt-test", "conv-test", false)
+	usage := &officialtypes.StreamUsage{
+		PromptTokens:     12,
+		CompletionTokens: 3,
+		TotalTokens:      15,
+	}
+	writeToolCallingSSE(c, "", calls, "gpt-test", "conv-test", false, usage)
 	lines := sseDataLines(writer.Body.String())
 	if len(lines) != 4 {
 		t.Fatalf("data line count = %d, want role + tool_calls + stop + DONE; output: %s", len(lines), writer.Body.String())
@@ -466,6 +582,13 @@ func TestWriteToolCallingSSEMatches9RouterStreamingShape(t *testing.T) {
 	finish := stopChunk["choices"].([]interface{})[0].(map[string]interface{})["finish_reason"]
 	if finish != "tool_calls" {
 		t.Fatalf("finish_reason = %#v, want tool_calls", finish)
+	}
+	stopUsage, ok := stopChunk["usage"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("usage = %#v, want usage object on final tool finish chunk", stopChunk["usage"])
+	}
+	if stopUsage["prompt_tokens"] != float64(12) || stopUsage["completion_tokens"] != float64(3) || stopUsage["total_tokens"] != float64(15) {
+		t.Fatalf("unexpected usage: %#v", stopUsage)
 	}
 	if lines[3] != "[DONE]" {
 		t.Fatalf("last data line = %q, want [DONE]", lines[3])

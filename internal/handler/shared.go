@@ -233,6 +233,16 @@ func toolCallingEnabled(tools []officialtypes.Tool, cfg *config.Config) bool {
 	return len(tools) > 0
 }
 
+// requestToolCallingEnabled applies the request-level OpenAI/9Router contract.
+// OpenCode can keep sending tool definitions while explicitly selecting
+// tool_choice="none"; that turn must bypass the tool emulation path entirely.
+func requestToolCallingEnabled(request *officialtypes.APIRequest, cfg *config.Config) bool {
+	if request == nil || (request.ToolChoice != nil && request.ToolChoice.IsForcedNone()) {
+		return false
+	}
+	return toolCallingEnabled(request.Tools, cfg)
+}
+
 // countMessagesTokens 统计消息的 token 数
 func countMessagesTokens(messages []officialtypes.APIMessage) int {
 	total := 0
@@ -294,7 +304,7 @@ func shouldRequireToolCall(request *officialtypes.APIRequest, text string) bool 
 		if request.ToolChoice.IsForcedNone() {
 			return false
 		}
-		if request.ToolChoice.Type == "any" || request.ToolChoice.ForcedFunctionName() != "" {
+		if request.ToolChoice.RequiresCall() {
 			return true
 		}
 	}
@@ -330,6 +340,36 @@ func normalizeIntentText(s string) string {
 		b.WriteRune(r)
 	}
 	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+const (
+	agentIntentAction = "action"
+	agentIntentAnswer = "answer"
+)
+
+func parseAgentIntent(text string) (string, string) {
+	const actionTag = "<agent_intent>action</agent_intent>"
+	const answerTag = "<agent_intent>answer</agent_intent>"
+	intent := ""
+	if strings.Contains(text, actionTag) {
+		intent = agentIntentAction
+	} else if strings.Contains(text, answerTag) {
+		intent = agentIntentAnswer
+	}
+	clean := strings.ReplaceAll(text, actionTag, "")
+	clean = strings.ReplaceAll(clean, answerTag, "")
+	return intent, strings.TrimSpace(clean)
+}
+
+// agentIntentRequiresTool is deliberately semantic rather than keyword based:
+// the upstream model classifies the latest turn as action vs. answer, while
+// the server only verifies the structural fact that no tool has run yet.
+func agentIntentRequiresTool(intent string, messages []officialtypes.APIMessage) bool {
+	return intent == agentIntentAction && !hasToolCallSinceLastUser(messages)
+}
+
+func incompleteAgentResponse(text string) bool {
+	return strings.TrimSpace(text) == "" || looksLikeDeferredToolAction(text)
 }
 
 func lastUserIndex(messages []officialtypes.APIMessage) int {
@@ -389,6 +429,38 @@ func previousContentTask(messages []officialtypes.APIMessage, before int) bool {
 		seenUsers++
 		if textLooksLikeContentTask(normalizeIntentText(messages[i].Text())) {
 			return true
+		}
+	}
+	return false
+}
+
+// deferredResponseRequiresTool decides whether a future-tense assistant reply
+// should be retried as a mandatory tool turn. It intentionally looks at the
+// conversation context rather than keyword-matching only the latest follow-up.
+func deferredResponseRequiresTool(messages []officialtypes.APIMessage) bool {
+	if conversationRequestsAction(messages) || conversationRequestsMutation(messages) {
+		return true
+	}
+	lastUser := lastUserIndex(messages)
+	return previousContentTask(messages, lastUser) || hasSuccessfulMutationBefore(messages, lastUser)
+}
+
+// hasSuccessfulMutationBefore preserves artifact context across terse
+// follow-ups. OpenCode sends the prior assistant tool_call and matching tool
+// result back to the provider, which is stronger evidence than relying on the
+// user to repeat words such as "game", "code", or a file extension.
+func hasSuccessfulMutationBefore(messages []officialtypes.APIMessage, before int) bool {
+	if before < 0 || before > len(messages) {
+		before = len(messages)
+	}
+	for i := 0; i < before; i++ {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+		for _, call := range messages[i].ToolCalls {
+			if toolCallMutatesWorkspace(call) && toolCallCompletedSuccessfully(messages, i, call.ID) {
+				return true
+			}
 		}
 	}
 	return false
@@ -565,7 +637,7 @@ func conversationRequestsMutation(messages []officialtypes.APIMessage) bool {
 	if i < 0 {
 		return false
 	}
-	text := normalizeIntentText(messages[i].Text())
+	text := stripNegatedMutationPhrases(normalizeIntentText(messages[i].Text()))
 	markers := []string{"hay tao ", "tao di", "tao game", "tao file", "tao app", "tao web", "tao project", "tao thu muc", "lam di", "lam luon", "tien hanh", "lam game", "lam app", "lam web", "viet ", "sua ", "them ", "xoa ", "cap nhat code", "fix it", "fix this", "implement ", "create ", "make ", "write ", "edit ", "modify ", "change ", "add ", "remove ", "delete ", "refactor", "rename ", "move file"}
 	for _, marker := range markers {
 		if strings.Contains(text, marker) {
@@ -585,6 +657,28 @@ func conversationRequestsMutation(messages []officialtypes.APIMessage) bool {
 		}
 	}
 	return false
+}
+
+// stripNegatedMutationPhrases prevents safety constraints such as "do not
+// modify any files" from being mistaken for a request to modify the workspace.
+// Only the negated verb is removed so a positive instruction elsewhere in the
+// same message (for example "fix the code, but do not edit tests") still wins.
+func stripNegatedMutationPhrases(text string) string {
+	for _, phrase := range []string{
+		"do not modify", "don't modify", "dont modify", "without modifying",
+		"do not change", "don't change", "dont change", "without changing",
+		"do not edit", "don't edit", "dont edit", "without editing",
+		"do not write", "don't write", "dont write", "without writing",
+		"do not create", "don't create", "dont create", "without creating",
+		"do not remove", "don't remove", "dont remove",
+		"do not delete", "don't delete", "dont delete",
+		"khong sua", "dung sua", "khong thay doi", "dung thay doi",
+		"khong viet", "dung viet", "khong tao", "dung tao",
+		"khong xoa", "dung xoa",
+	} {
+		text = strings.ReplaceAll(text, phrase, "")
+	}
+	return strings.Join(strings.Fields(text), " ")
 }
 
 func assistantPromisesMutation(text string) bool {
@@ -608,7 +702,7 @@ func userExplicitlyRequestsTool(messages []officialtypes.APIMessage) bool {
 				return false
 			}
 		}
-		markers := []string{"must use the shell", "must use shell", "must use bash", "must use a tool", "use the shell tool", "use shell", "use bash", "use a tool", "call the tool", "run a command", "execute a command", "phai dung shell", "phai dung bash", "phai dung tool", "dung shell", "dung bash", "goi tool", "chay lenh"}
+		markers := []string{"must use the shell", "must use shell", "must use the bash tool", "must use bash", "must use a tool", "use the shell tool", "use the bash tool", "use shell", "use bash", "use a tool", "call the tool", "run a command", "execute a command", "phai dung shell", "phai dung bash", "phai dung tool", "dung shell", "dung bash", "goi tool", "chay lenh"}
 		for _, marker := range markers {
 			if strings.Contains(t, marker) {
 				return true

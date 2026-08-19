@@ -90,7 +90,7 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 	}
 
 	// 工具调用模式判定
-	toolsEnabled := toolCallingEnabled(original_request.Tools, h.cfg)
+	toolsEnabled := requestToolCallingEnabled(&original_request, h.cfg)
 	toolStreamRequested := original_request.Stream
 	if toolsEnabled && h.cfg.StreamMode {
 		original_request.Stream = false
@@ -689,6 +689,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	requireToolCall := shouldRequireToolCall(originalRequest, "")
 	semanticRetry := false
 	semanticFollowupContent := false
+	completionRetry := false
 	if requireToolCall && maxRefusalRetries > 2 {
 		maxRefusalRetries = 2
 	}
@@ -697,7 +698,23 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	// OpenCode renders Shell/Write/Edit rows from delta.tool_calls itself.
 	progressStarted := false
 	if logPath := h.cfg.DebugToolLog; logPath != "" {
-		debugText := fmt.Sprintf("require_tool_call=%v messages=%d", requireToolCall, len(originalRequest.Messages))
+		toolChoice := "<unset>"
+		if originalRequest.ToolChoice != nil {
+			toolChoice = originalRequest.ToolChoice.Type
+			if forced := originalRequest.ToolChoice.ForcedFunctionName(); forced != "" {
+				toolChoice += ":" + forced
+			}
+		}
+		debugText := fmt.Sprintf(
+			"require_tool_call=%v tool_choice=%s messages=%d prior_tool_call=%v content_task=%v mutation_task=%v action_task=%v",
+			requireToolCall,
+			toolChoice,
+			len(originalRequest.Messages),
+			hasToolCallSinceLastUser(originalRequest.Messages),
+			conversationRequiresContentWork(originalRequest.Messages),
+			conversationRequestsMutation(originalRequest.Messages),
+			conversationRequestsAction(originalRequest.Messages) || userExplicitlyRequestsTool(originalRequest.Messages),
+		)
 		if len(originalRequest.Messages) > 0 {
 			last := originalRequest.Messages[len(originalRequest.Messages)-1]
 			debugText += fmt.Sprintf(" last_role=%s last_text=%q", last.Role, last.Text())
@@ -711,7 +728,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		}
 		translated := baseTranslated
 		if len(tools) > 0 {
-			translated.AddMessage("user", "\n\n[HOST AGENT SEMANTIC CONTRACT: Infer the user's intent from the meaning of the full conversation, not from keywords. If the user is asking you to create, modify, inspect, run, test, deploy, or otherwise act on the REAL host workspace, immediately emit the appropriate <tool_call> block(s); do not announce a future plan. If the user is only asking a question, requesting an explanation/opinion, or clarifying information, answer fully in normal text and do not call tools. Follow-up requests may refer implicitly to an artifact created earlier.]")
+			translated.AddMessage("user", "\n\n[HOST AGENT SEMANTIC CONTRACT: Infer the latest user's intent from the meaning of the FULL conversation, not from keywords. Start your response with EXACTLY ONE hidden intent marker. Use <agent_intent>action</agent_intent> when the user wants any real host/workspace action (including implicit follow-ups that refer to an artifact created earlier); immediately follow it with the appropriate <tool_call> block(s) and no planning prose. Use <agent_intent>answer</agent_intent> when the user only wants information, explanation, opinion, or clarification; follow it with the complete answer in normal text and do not call tools. Never reply with a future promise such as 'I will...' instead of acting or answering now.]")
 		}
 		if requireToolCall {
 			retrySuffix := "\n\n[HOST TOOL PROTOCOL OVERRIDE: Do NOT look for a native ChatGPT bash/shell/file tool. The surrounding OpenCode host intercepts <tool_call> blocks from your TEXT response and executes them on the user's REAL machine. Your job is only to emit the protocol block; the host performs the command and sends the real result back on the next turn. Therefore never say the tool is unavailable, never guess command output or paths, and never describe what you plan to inspect. Respond with ONLY one or more <tool_call> blocks, starting immediately with '<tool_call>'.]"
@@ -740,6 +757,8 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 				retrySuffix += "\nThis is a create/modify task. Read-only inspection (pwd/ls/tree/Test-Path/read) does NOT count as doing the work. Emit a REAL write/edit/create tool call or a mutating shell command for the user's requested target NOW. Do not describe a plan, do not claim a file exists, and do not use a read-only tool as a substitute."
 			}
 			translated.AddMessage("user", retrySuffix)
+		} else if completionRetry {
+			translated.AddMessage("user", "\n\n[HOST COMPLETION RETRY: The required host tool work has already completed and was verified. Your previous response contained only an internal intent marker. Start with <agent_intent>answer</agent_intent> and then give the user a concise final summary of the completed work. Do not call another tool and do not output an empty answer.]")
 		} else if semanticRetry {
 			translated.AddMessage("user", "\n\n[HOST INTENT RETRY: Your previous reply only deferred the next step instead of completing the turn. Re-evaluate the user's intent from the full conversation. If real host/workspace action is required, emit the correct <tool_call> immediately. If the user only wants information/explanation, answer it fully now in text. Do not reply with another promise about what you will do later.]")
 		}
@@ -766,7 +785,8 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		})
 		response.Body.Close()
 
-		lastText = result.Text
+		agentIntent, cleanText := parseAgentIntent(result.Text)
+		lastText = cleanText
 		lastConversationID = result.ConversationID
 		lastSentinel = result.Sentinel
 		(*clientState).NoteTurnResult(result.ConversationID, result.ParentMessageID)
@@ -776,13 +796,13 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 
 		// 解析 <tool_call>{...}</tool_call>
 		parser := toolcall.NewParser()
-		_, calls := parser.Feed(result.Text)
+		_, calls := parser.Feed(cleanText)
 		if len(calls) == 0 {
 			_, extraCalls := parser.Flush()
 			calls = append(calls, extraCalls...)
 		}
 		if len(calls) == 0 {
-			calls = toolcall.RecoverFromText(result.Text, tools)
+			calls = toolcall.RecoverFromText(cleanText, tools)
 		}
 		for i := range calls {
 			calls[i].Index = i
@@ -799,7 +819,15 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		}
 
 		if !requireToolCall {
-			requireToolCall = shouldRequireToolCall(originalRequest, result.Text)
+			requireToolCall = shouldRequireToolCall(originalRequest, cleanText)
+		}
+		// The semantic marker lets the upstream model classify terse follow-ups
+		// without relying on keywords. Only escalate an action marker when no
+		// tool has run for the latest user turn; completed write+verify turns are
+		// allowed to proceed to their final summary.
+		if !requireToolCall && agentIntentRequiresTool(agentIntent, originalRequest.Messages) {
+			requireToolCall = true
+			semanticFollowupContent = previousContentTask(originalRequest.Messages, lastUserIndex(originalRequest.Messages)) || hasSuccessfulMutationBefore(originalRequest.Messages, lastUserIndex(originalRequest.Messages))
 		}
 		if requireToolCall {
 			if attempt < maxRefusalRetries-1 {
@@ -807,12 +835,28 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			}
 			continue
 		}
-		if looksLikeDeferredToolAction(result.Text) {
+		if looksLikeDeferredToolAction(cleanText) {
 			semanticRetry = true
 			userIndex := lastUserIndex(originalRequest.Messages)
 			semanticFollowupContent = previousContentTask(originalRequest.Messages, userIndex)
+			// A follow-up such as "make it vertical and add music" may not repeat
+			// words like game/code/file. Once the model confirms the semantic
+			// action by replying "I will ...", inherit the earlier content task and
+			// escalate the retry to the mandatory host-tool protocol. Without this
+			// transition the retry remains tool_choice=auto and can return a second
+			// promise, which OpenCode renders as text instead of executing bash.
+			if semanticFollowupContent || deferredResponseRequiresTool(originalRequest.Messages) {
+				requireToolCall = true
+			}
 			if attempt < maxRefusalRetries-1 {
 				fmt.Fprintf(os.Stderr, "[chatgpt] deferred response without tool or complete answer (attempt %d/%d), retrying intent classification\n", attempt+1, maxRefusalRetries)
+				continue
+			}
+		}
+		if strings.TrimSpace(cleanText) == "" {
+			completionRetry = true
+			if attempt < maxRefusalRetries-1 {
+				fmt.Fprintf(os.Stderr, "[chatgpt] empty response after removing internal intent marker (attempt %d/%d), retrying final summary\n", attempt+1, maxRefusalRetries)
 				continue
 			}
 		}
@@ -821,7 +865,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 
 	if len(lastToolCalls) > 0 {
 		if streamRequested {
-			writeToolCallingSSE(c, "", lastToolCalls, *reqModel, lastConversationID, progressStarted)
+			writeToolCallingSSE(c, "", lastToolCalls, *reqModel, lastConversationID, progressStarted, toolStreamUsage(originalRequest, *inputTokens, lastText))
 			return
 		}
 		c.JSON(200, officialtypes.NewChatCompletionWithToolCalls(
@@ -851,28 +895,50 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		}})
 		return
 	}
+	if completionRetry && strings.TrimSpace(lastText) == "" {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
+			"message": "model completed the tool turn but returned an empty final answer",
+			"type":    "agent_intent_error",
+			"code":    "empty_agent_response",
+		}})
+		return
+	}
 	outputTokens := util.CountToken(lastText)
 	if streamRequested {
 		if progressStarted {
 			writeToolProgressSSE(c, *reqModel, "✅ Đã đủ bước thao tác/kiểm tra — đang trả kết quả cuối...")
 		}
-		writeToolCallingSSE(c, lastText, nil, *reqModel, lastConversationID, progressStarted)
+		writeToolCallingSSE(c, lastText, nil, *reqModel, lastConversationID, progressStarted, toolStreamUsage(originalRequest, *inputTokens, lastText))
 		return
 	}
 	c.JSON(200, officialtypes.NewChatCompletionWithMetadata(lastText, *inputTokens, outputTokens, *reqModel, lastConversationID, lastSentinel))
 }
 
-func writeToolCallingSSE(c *gin.Context, text string, calls []officialtypes.ToolCall, model, conversationID string, progressStarted bool) {
+func toolStreamUsage(request *officialtypes.APIRequest, inputTokens int, output string) *officialtypes.StreamUsage {
+	if request == nil || request.StreamOptions == nil || !request.StreamOptions.IncludeUsage {
+		return nil
+	}
+	outputTokens := util.CountToken(output)
+	return &officialtypes.StreamUsage{
+		PromptTokens:     inputTokens,
+		CompletionTokens: outputTokens,
+		TotalTokens:      inputTokens + outputTokens,
+	}
+}
+
+func writeToolCallingSSE(c *gin.Context, text string, calls []officialtypes.ToolCall, model, conversationID string, progressStarted bool, usage *officialtypes.StreamUsage) {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	streamID := "chatcmpl-" + uuid.NewString()
+	created := time.Now().Unix()
 
 	if !progressStarted {
 		roleChunk := officialtypes.ChatCompletionChunk{
-			ID:      "chatcmpl-QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
+			ID:      streamID,
 			Object:  "chat.completion.chunk",
-			Created: 0,
+			Created: created,
 			Model:   model,
 			Choices: []officialtypes.Choices{{
 				Index: 0,
@@ -899,15 +965,25 @@ func writeToolCallingSSE(c *gin.Context, text string, calls []officialtypes.Tool
 			})
 		}
 		chunk := officialtypes.NewToolCallChunk(model, deltas...)
+		chunk.ID = streamID
+		chunk.Created = created
 		c.Writer.WriteString("data: " + chunk.String() + "\n\n")
 		stop := officialtypes.NewToolCallStopChunk(model, conversationID)
+		stop.ID = streamID
+		stop.Created = created
+		stop.Usage = usage
 		c.Writer.WriteString("data: " + stop.String() + "\n\n")
 	} else {
 		if text != "" {
 			chunk := officialtypes.NewChatCompletionChunk(text, model)
+			chunk.ID = streamID
+			chunk.Created = created
 			c.Writer.WriteString("data: " + chunk.String() + "\n\n")
 		}
 		stop := officialtypes.StopChunkWithConversation("stop", model, conversationID)
+		stop.ID = streamID
+		stop.Created = created
+		stop.Usage = usage
 		c.Writer.WriteString("data: " + stop.String() + "\n\n")
 	}
 

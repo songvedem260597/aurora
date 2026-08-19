@@ -3,6 +3,8 @@ package official
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type ChatCompletionChunk struct {
@@ -44,9 +46,9 @@ type Delta struct {
 // ToolCallDelta 是 OpenAI 协议里 delta.tool_calls 元素的最小形态:
 // 流式响应中 name / arguments 按"先 name 后 arguments"分块发出。
 type ToolCallDelta struct {
-	Index    int             `json:"index"`
-	ID       string          `json:"id,omitempty"`
-	Type     string          `json:"type,omitempty"`
+	Index    int               `json:"index"`
+	ID       string            `json:"id,omitempty"`
+	Type     string            `json:"type,omitempty"`
 	Function ToolCallFuncDelta `json:"function"`
 }
 
@@ -57,7 +59,9 @@ type ToolCallFuncDelta struct {
 
 // ToolCall 是非流式响应 message.tool_calls 元素的完整形态。
 type ToolCall struct {
-	Index    int          `json:"index"`
+	// Index is used internally to build streaming deltas. OpenAI/9Router do not
+	// include it in a completed message.tool_calls item.
+	Index    int          `json:"-"`
 	ID       string       `json:"id"`
 	Type     string       `json:"type"`
 	Function ToolCallFunc `json:"function"`
@@ -171,7 +175,7 @@ type ChatCompletion struct {
 }
 type Msg struct {
 	Role             string     `json:"role"`
-	Content          string     `json:"content"`
+	Content          *string    `json:"content,omitempty"`
 	ReasoningContent string     `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
 }
@@ -215,9 +219,9 @@ func NewChatCompletionWithToolCalls(fullText string, reasoningContent string, to
 		contentPtr = &fullText
 	}
 	return ChatCompletion{
-		ID:             "chatcmpl-QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
+		ID:             "chatcmpl-" + uuid.NewString(),
 		Object:         "chat.completion",
-		Created:        int64(0),
+		Created:        time.Now().Unix(),
 		Model:          model,
 		ConversationID: conversationID,
 		Sentinel:       sentinel,
@@ -229,7 +233,7 @@ func NewChatCompletionWithToolCalls(fullText string, reasoningContent string, to
 		Choices: []Choice{
 			{
 				Message: Msg{
-					Content:          derefString(contentPtr),
+					Content:          contentPtr,
 					ReasoningContent: reasoningContent,
 					Role:             "assistant",
 					ToolCalls:        toolCalls,
@@ -239,13 +243,6 @@ func NewChatCompletionWithToolCalls(fullText string, reasoningContent string, to
 			},
 		},
 	}
-}
-
-func derefString(p *string) string {
-	if p == nil {
-		return ""
-	}
-	return *p
 }
 
 type ResponsesResponse struct {
@@ -259,8 +256,8 @@ type ResponsesResponse struct {
 	Usage            ResponsesUsage        `json:"usage"`
 	ReasoningContent string                `json:"reasoning_content,omitempty"`
 	// MsSinceStart / MsTTFT 是流式响应的耗时信息（毫秒），嵌入 response.completed 事件。
-	MsSinceStart     int64                 `json:"ms_since_start,omitempty"`
-	MsTTFT           int64                 `json:"ms_ttft,omitempty"`
+	MsSinceStart int64 `json:"ms_since_start,omitempty"`
+	MsTTFT       int64 `json:"ms_ttft,omitempty"`
 }
 
 type ResponsesTextDeltaEvent struct {
@@ -371,11 +368,11 @@ func ResponsesCompleted(response ResponsesResponse) string {
 
 // ResponsesUsage 对齐 OpenAI ResponseUsage。
 type ResponsesUsage struct {
-	InputTokens         int                        `json:"input_tokens"`
+	InputTokens         int                          `json:"input_tokens"`
 	InputTokensDetails  ResponsesInputTokensDetails  `json:"input_tokens_details"`
-	OutputTokens        int                        `json:"output_tokens"`
+	OutputTokens        int                          `json:"output_tokens"`
 	OutputTokensDetails ResponsesOutputTokensDetails `json:"output_tokens_details"`
-	TotalTokens         int                        `json:"total_tokens"`
+	TotalTokens         int                          `json:"total_tokens"`
 }
 
 type ResponsesInputTokensDetails struct {

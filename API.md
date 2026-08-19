@@ -159,7 +159,8 @@ curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
 
 - `"auto"`(默认):模型自行决定是否调用
 - `"none"`:禁止调用工具
-- `"any"`:强制至少调用一个工具
+- `"required"`:强制至少调用一个工具(OpenAI 标准值)
+- `"any"`:强制至少调用一个工具,作为 `"required"` 的兼容别名
 - `{"type":"function","function":{"name":"bash"}}`:强制调用指定工具
 
 ```json
@@ -168,6 +169,24 @@ curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
   "tools": [...]
 }
 ```
+
+### 流式工具调用
+
+当请求使用 `"stream": true` 时,Aurora 对客户端返回与 OpenCode/9Router 兼容的 SSE。服务端仍会先在内部聚合 ChatGPT Web 的回复,以便解析 `<tool_call>` 并执行拒绝重试;这不会把客户端响应降级为非流式 JSON。
+
+工具调用成功时,事件顺序如下:
+
+```text
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1787112636,"model":"auto","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1787112636,"model":"auto","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_...","type":"function","function":{"name":"bash","arguments":"{\"command\":\"pwd\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-...","object":"chat.completion.chunk","created":1787112636,"model":"auto","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":123,"completion_tokens":18,"total_tokens":141}}
+
+data: [DONE]
+```
+
+仅当请求携带 `"stream_options":{"include_usage":true}` 时,最终 `finish_reason:"tool_calls"` chunk 才附带 `usage`;未启用时该字段省略,随后发送 `[DONE]`。
 
 ### 环境变量
 
@@ -179,7 +198,7 @@ curl --location 'http://你的服务器ip:8080/v1/chat/completions' \
 
 ### 限制
 
-- **强制非流式**:工具调用模式会强制 `stream=false`(需要完整响应才能识别 sandbox 拒绝并重试)。客户端即使传 `stream: true` 也只会拿到单次 ChatCompletion。
+- **内部聚合**:工具调用模式会在服务端内部聚合上游回复(需要完整响应才能识别 sandbox 拒绝并重试);客户端传 `stream: true` 时仍会收到上述 OpenCode/9Router 兼容 SSE。
 - **不在服务端执行工具**:Aurora 只做协议转换,工具的实际执行完全由客户端负责。
 - **仅解析首个拒绝**:当前实现不会处理"工具执行失败 → 重试"循环;若需重试,由客户端再次发起完整对话。
 

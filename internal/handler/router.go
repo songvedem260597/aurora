@@ -42,6 +42,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 
 	router.OPTIONS("/v1/chat/completions", optionsHandler)
 	router.OPTIONS("/v1/models", optionsHandler)
+	router.OPTIONS("/v1/models/info", optionsHandler)
 	router.OPTIONS("/v1/responses", optionsHandler)
 	router.OPTIONS("/v1/images/generations", optionsHandler)
 	router.OPTIONS("/v1/images/edits", optionsHandler)
@@ -56,6 +57,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	authGroup.POST("/v1/responses", chatHandler.Responses)
 	authGroup.POST("/v1/files", chatHandler.Files)
 	authGroup.GET("/v1/models", modelsHandler.ListModels)
+	authGroup.GET("/v1/models/info", modelsHandler.GetModelInfo)
 	authGroup.POST("/backend-api/conversation", chatHandler.ChatGPTConversation)
 	authGroup.POST("/v1/images/generations", imageHandler.Generations)
 	authGroup.POST("/v1/images/edits", imageHandler.Edits)
