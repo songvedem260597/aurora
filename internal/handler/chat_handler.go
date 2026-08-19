@@ -945,6 +945,17 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			semanticFollowupContent = previousContentTask(originalRequest.Messages, lastUserIndex(originalRequest.Messages)) || hasSuccessfulMutationBefore(originalRequest.Messages, lastUserIndex(originalRequest.Messages))
 		}
 		if requireToolCall {
+			debugResponse := result.Text
+			if len(debugResponse) > 1200 {
+				debugResponse = debugResponse[:1200] + "..."
+			}
+			fmt.Fprintf(
+				os.Stderr,
+				"[chatgpt-tool-response] attempt=%d intent=%q raw=%q\n",
+				attempt+1,
+				agentIntent,
+				debugResponse,
+			)
 			if attempt < maxRefusalRetries-1 {
 				fmt.Fprintf(os.Stderr, "[chatgpt] tool call required but none produced (attempt %d/%d), retrying\n", attempt+1, maxRefusalRetries)
 			}
