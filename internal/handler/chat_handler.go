@@ -1019,7 +1019,7 @@ func writeToolErrorSSE(c *gin.Context, message string) {
 }
 func toolProgressSummary(calls []officialtypes.ToolCall) string {
 	if len(calls) == 0 {
-		return "🔧 Aurora đã yêu cầu chạy tool"
+		return "🔧 Tool execution requested"
 	}
 	parts := make([]string, 0, len(calls))
 	for _, call := range calls {

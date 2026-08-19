@@ -25,6 +25,7 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 	audioHandler := NewAudioHandler(accountPool, cfg)
 	authHandler := NewAuthHandler(accountPool)
 	modelsHandler := NewModelsHandler()
+	apiKeyHandler := NewAPIKeyHandler(cfg)
 
 	// 初始化基础前置参数（DPL、BasicCookies 等）
 	proxyUrl := ""
@@ -39,7 +40,9 @@ func RegisterRouter(accountPool *accounts.Pool, cfg *config.Config) *gin.Engine 
 
 	router.POST("/auth/session", authHandler.Session)
 	router.POST("/auth/refresh", authHandler.Refresh)
+	router.POST("/v1/api-keys", middlewares.AdminAuthorization, apiKeyHandler.Create)
 
+	router.OPTIONS("/v1/api-keys", optionsHandler)
 	router.OPTIONS("/v1/chat/completions", optionsHandler)
 	router.OPTIONS("/v1/models", optionsHandler)
 	router.OPTIONS("/v1/models/info", optionsHandler)
