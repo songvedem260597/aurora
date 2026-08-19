@@ -3,6 +3,7 @@ package toolcall
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -34,6 +35,114 @@ func ResolveShellTool(tools []official.Tool) (string, string) {
 		return t.Function.Name, param
 	}
 	return "", ""
+}
+
+var (
+	fencedCommandPattern = regexp.MustCompile("(?is)```(?:bash|sh|shell|powershell|pwsh|cmd)?\\s*\\r?\\n?(.+?)```")
+	inlineCommandPattern = regexp.MustCompile("`([^`\\r\\n]+)`")
+	englishRunPattern    = regexp.MustCompile(`(?is)\b(?:run|execute)\s+(?:(?:the\s+)?command\s+)?(.+)$`)
+	vietnameseRunPattern = regexp.MustCompile(`(?is)\b(?:chạy|chay)\s+(?:lệnh|lenh)\s+(.+)$`)
+)
+
+// RecoverExplicitShellRequest builds a host shell tool call without an
+// upstream model round-trip when the user supplied the literal command. It is
+// deliberately strict: fenced/inline code is accepted, as is text following
+// an explicit "run/execute command" phrase. Vague requests are left to the
+// model instead of inventing a command.
+func RecoverExplicitShellRequest(text string, tools []official.Tool) []official.ToolCall {
+	shellName, shellParam := ResolveShellTool(tools)
+	if shellName == "" {
+		return nil
+	}
+	command := explicitCommandFromText(text, shellName)
+	if command == "" {
+		return nil
+	}
+	arguments, _ := json.Marshal(map[string]string{shellParam: command})
+	return []official.ToolCall{{
+		ID:   generateCallID(),
+		Type: "function",
+		Function: official.ToolCallFunc{
+			Name:      shellName,
+			Arguments: string(arguments),
+		},
+	}}
+}
+
+func explicitCommandFromText(text, shellName string) string {
+	if match := fencedCommandPattern.FindStringSubmatch(text); len(match) == 2 {
+		return cleanExplicitCommand(match[1], true)
+	}
+	inline := inlineCommandPattern.FindAllStringSubmatch(text, -1)
+	inlineCandidates := make([]string, 0, len(inline))
+	for i := 0; i < len(inline); i++ {
+		candidate := cleanExplicitCommand(inline[i][1], false)
+		if candidate != "" && !strings.EqualFold(candidate, shellName) {
+			inlineCandidates = append(inlineCandidates, candidate)
+		}
+	}
+	if len(inlineCandidates) == 1 {
+		return inlineCandidates[0]
+	}
+	if len(inlineCandidates) > 1 {
+		return ""
+	}
+	for _, pattern := range []*regexp.Regexp{vietnameseRunPattern, englishRunPattern} {
+		if match := pattern.FindStringSubmatch(text); len(match) == 2 {
+			if candidate := cleanExplicitCommand(trimCommandTail(match[1]), false); commandLooksLiteral(candidate) {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func trimCommandTail(command string) string {
+	lower := strings.ToLower(command)
+	cut := len(command)
+	for _, separator := range []string{
+		" and then ", " then ", " and reply", " and return", " on the real machine", " on the host",
+		" rồi ", " roi ", " và trả lời", " va tra loi", " trên máy", " tren may",
+	} {
+		if i := strings.Index(lower, separator); i >= 0 && i < cut {
+			cut = i
+		}
+	}
+	return command[:cut]
+}
+
+func cleanExplicitCommand(command string, multiline bool) string {
+	command = strings.TrimSpace(command)
+	command = strings.Trim(command, `"'`)
+	if !multiline && strings.ContainsAny(command, "\r\n") {
+		return ""
+	}
+	if strings.HasSuffix(command, ".") && !strings.HasSuffix(command, "...") {
+		command = strings.TrimSpace(strings.TrimSuffix(command, "."))
+	}
+	if len(command) == 0 || len(command) > 4096 {
+		return ""
+	}
+	return command
+}
+
+func commandLooksLiteral(command string) bool {
+	if command == "" {
+		return false
+	}
+	first := strings.ToLower(strings.Fields(command)[0])
+	for _, vague := range []string{"a", "an", "the", "this", "that", "some", "command", "tool", "tests", "test", "code"} {
+		if first == vague {
+			return false
+		}
+	}
+	for _, r := range first {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || strings.ContainsRune(`._:/\\-`, r) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func pickShellParam(paramsJSON json.RawMessage) string {
@@ -209,8 +318,8 @@ func contains(haystack []string, needle string) bool {
 
 // StreamToToolCallDeltas 把完整 ToolCall 列表切成 OpenAI 流式协议需要的
 // 多个 delta chunk(按出现顺序):
-//   1) 先发 {index, id, type, function.name}
-//   2) 再发 {index, function.arguments(分片)}
+//  1. 先发 {index, id, type, function.name}
+//  2. 再发 {index, function.arguments(分片)}
 //
 // 返回的每个元素对应一个 SSE chunk 的 delta.tool_calls 数组(每条只有一项)。
 func StreamToToolCallDeltas(calls []official.ToolCall) [][]official.ToolCallDelta {

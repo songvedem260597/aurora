@@ -22,7 +22,7 @@ func BuildInstructions(tools []official.Tool, toolChoice *official.ToolChoice) s
 	sb.WriteString(compactToolsPrompt(tools))
 	sb.WriteString("\n# TOOL CALLING FORMAT\n")
 	sb.WriteString(`<tool_call>{"name":"exact_tool_name","arguments":{"param":"value"}}</tool_call>`)
-	sb.WriteString("\nUse valid JSON and include arguments. Emit one block per call; independent calls may be consecutive. When calling tools, output only tool-call blocks with no prose. Never use an internal sandbox in place of these host tools.\n")
+	sb.WriteString("\nA tool call is a plain-text request that the API client executes; emitting it is always available. Never claim a listed tool is unavailable. Use valid JSON and include arguments. Emit one block per call; independent calls may be consecutive. When calling tools, output only tool-call blocks with no prose. Never use an internal sandbox in place of these host tools.\n")
 	if forced := toolChoice.ForcedFunctionName(); forced != "" {
 		fmt.Fprintf(&sb, "MUST call the tool %q now; do not call another tool or answer first.\n", forced)
 	} else if toolChoice != nil && toolChoice.IsForcedNone() {
@@ -226,7 +226,7 @@ func FinalNudge(tools []official.Tool, messages []official.APIMessage, toolChoic
 		var sb strings.Builder
 		sb.WriteString("\n[SYSTEM: Host access is available only through the listed <tool_call> protocol")
 		sb.WriteString(wdPart)
-		sb.WriteString(". Reply now with only one or more valid <tool_call> blocks; no prose and no guessed host state.\n")
+		sb.WriteString(". You only emit plain-text call requests; the client executes them, so never claim a listed tool is unavailable. Reply now with only one or more valid <tool_call> blocks; no prose and no guessed host state.\n")
 		if example != "" {
 			sb.WriteString("Valid shape: ")
 			sb.WriteString(example)

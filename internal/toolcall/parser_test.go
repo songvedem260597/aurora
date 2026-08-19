@@ -292,6 +292,46 @@ func TestResolveShellTool(t *testing.T) {
 	}
 }
 
+func TestRecoverExplicitShellRequest(t *testing.T) {
+	tools := []official.Tool{{Type: "function", Function: official.ToolFunction{
+		Name:       "bash",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+	}}}
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "english natural", text: "Use the bash tool to run pwd.", want: "pwd"},
+		{name: "vietnamese natural", text: "Dùng bash chạy lệnh pwd trên máy thật rồi trả lời kết quả.", want: "pwd"},
+		{name: "inline", text: "Use `bash` to run `go test ./...`", want: "go test ./..."},
+		{name: "multiple inline ambiguous", text: "Use bash to run `pwd` and `whoami`", want: ""},
+		{name: "fenced", text: "Execute this:\n```bash\nnpm test\n```", want: "npm test"},
+		{name: "vague", text: "Use bash to run the tests.", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := RecoverExplicitShellRequest(tt.text, tools)
+			if tt.want == "" {
+				if len(calls) != 0 {
+					t.Fatalf("vague request unexpectedly recovered: %#v", calls)
+				}
+				return
+			}
+			if len(calls) != 1 || calls[0].Function.Name != "bash" {
+				t.Fatalf("calls = %#v, want one bash call", calls)
+			}
+			var args map[string]string
+			if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &args); err != nil {
+				t.Fatalf("invalid arguments: %v", err)
+			}
+			if args["command"] != tt.want {
+				t.Fatalf("command = %q, want %q", args["command"], tt.want)
+			}
+		})
+	}
+}
+
 func TestStreamToToolCallDeltas(t *testing.T) {
 	calls := []official.ToolCall{
 		{ID: "c1", Type: "function", Function: official.ToolCallFunc{Name: "x", Arguments: `{"a":1}`}},

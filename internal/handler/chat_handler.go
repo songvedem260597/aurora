@@ -718,6 +718,28 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		maxRefusalRetries = 3
 	}
 	requireToolCall := shouldRequireToolCall(originalRequest, "")
+	// If the user supplied a literal shell command and explicitly requested the
+	// advertised host tool, no model decision is needed. Emit the standard
+	// OpenAI tool call immediately. The client still owns permission checks and
+	// execution; Aurora only avoids an unreliable upstream classification turn.
+	if requireToolCall && !latestUserHasAttachment(originalRequest.Messages) &&
+		(userExplicitlyRequestsTool(originalRequest.Messages) || explicitlyRequestedToolName(originalRequest.Messages, tools) != "") {
+		if userIndex := lastUserIndex(originalRequest.Messages); userIndex >= 0 {
+			if calls := toolcall.RecoverExplicitShellRequest(originalRequest.Messages[userIndex].Text(), tools); len(calls) > 0 {
+				for i := range calls {
+					calls[i].Index = i
+				}
+				if streamRequested {
+					writeToolCallingSSE(c, "", calls, *reqModel, "", false, toolStreamUsage(originalRequest, *inputTokens, ""))
+					return
+				}
+				c.JSON(http.StatusOK, officialtypes.NewChatCompletionWithToolCalls(
+					"", "", calls, *inputTokens, 0, *reqModel, "", nil,
+				))
+				return
+			}
+		}
+	}
 
 	upstreamRequest, informationalAttachment := toolUpstreamRequest(originalRequest)
 	forceRequiredUpstreamToolChoice(&upstreamRequest, requireToolCall)
@@ -821,7 +843,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			translated.AddMessage("user", "\n\n[HOST INTENT: Start with exactly one marker. Use <agent_intent>action</agent_intent> plus immediate <tool_call> blocks when real host/workspace action is needed. Use <agent_intent>answer</agent_intent> plus the complete plain-text answer when no host action is needed. An already attached file is input, not a request to run a host tool. Never promise future action.]")
 		}
 		if requireToolCall {
-			retrySuffix := "\n\n[HOST TOOL: The client executes listed <tool_call> blocks on the real host and returns their output next turn. Reply now with only valid tool-call blocks. Do not use a native sandbox, guess output, or write prose.]"
+			retrySuffix := "\n\n[HOST TOOL: You only emit plain-text <tool_call> requests; the client executes them on the real host and returns output next turn. Emitting a listed call is always available—never claim otherwise. Reply now with only valid tool-call blocks. Do not use a native sandbox, guess output, or write prose.]"
 			contentTask := conversationRequiresContentWork(originalRequest.Messages) || semanticFollowupContent
 			contentMutationRequired := contentTask && !hasContentMutationToolCallSinceLastUser(originalRequest.Messages)
 			verificationRequired := contentTask && !contentMutationRequired && !hasVerificationAfterContentMutation(originalRequest.Messages)
