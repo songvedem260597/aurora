@@ -60,9 +60,9 @@ func NewChatGPTRequest() ChatGPTRequest {
 		Timezone:                   "America/Los_Angeles",
 		ConversationMode:           map[string]string{"kind": "primary_assistant"},
 		SystemHints:                []string{},
-		// 不在普通 /f/conversation 请求中声明 followups/buffering/encoding 能力。
-		// 这些字段会改变上游的流式交付路径，曾导致 completion 响应提前结束。
-		// /f/conversation/prepare 的协议字段由 prepare 请求单独构造。
+		// ä¸åœ¨æ™®é€š /f/conversation è¯·æ±‚ä¸­å£°æ˜Ž followups/buffering/encoding èƒ½åŠ›ã€‚
+		// è¿™äº›å­—æ®µä¼šæ”¹å˜ä¸Šæ¸¸çš„æµå¼äº¤ä»˜è·¯å¾„ï¼Œæ›¾å¯¼è‡´ completion å“åº”æå‰ç»“æŸã€‚
+		// /f/conversation/prepare çš„åè®®å­—æ®µç”± prepare è¯·æ±‚å•ç‹¬æž„é€ ã€‚
 		ParagenCotSummaryDisplayOverride: "allow",
 		ForceParallelSwitch:              "auto",
 		ThinkingEffort:                   "standard",
@@ -104,12 +104,15 @@ func (c *ChatGPTRequest) AddAssistantMessage(input string) {
 	c.Messages = append(c.Messages, msg)
 }
 
-// AddToolMessage 追加一个 role=tool 的消息,把客户端执行工具的结果回传给上游。
-// toolName 形如 "bash";result 是工具返回的字符串(可能含换行)。
+// AddToolMessage converts an OpenAI role=tool result into a normal ChatGPT Web
+// user/context message. ChatGPT Web does not reliably consume author.role="tool".
+// Keeping the result in an explicit envelope lets the model continue from the
+// real host result without hanging the web-conversation turn.
 func (c *ChatGPTRequest) AddToolMessage(toolName, result string) {
-	// 包成 "Tool (Resultado da ferramenta bash): ..." 文本格式以兼容  协议
-	text := "Tool (Resultado da ferramenta " + toolName + "): " + result
-	c.AddMessage("tool", text)
+	text := "[HOST TOOL RESULT]\nTool: " + toolName + "\nResult:\n" + result +
+		"\n[END HOST TOOL RESULT]\nUse this real result to continue the task. " +
+		"Do not repeat the same tool call unless another call is actually needed."
+	c.AddMessage("user", text)
 }
 
 func isStringPart(part interface{}) bool {

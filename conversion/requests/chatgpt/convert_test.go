@@ -132,16 +132,19 @@ func TestConvertAPIRequestHandlesToolResult(t *testing.T) {
 		},
 	}
 	out := testConvert(t, req)
-	// 找到 tool 消息
+	// ChatGPT Web does not reliably accept author.role="tool". Aurora must
+	// convert the OpenAI tool result into an explicit user/context envelope.
 	var toolMsg string
 	for _, m := range out.Messages {
-		if m.Author.Role == "tool" {
+		if m.Author.Role == "user" && len(m.Content.Parts) > 0 {
 			text, _ := m.Content.Parts[0].(string)
-			toolMsg = text
+			if strings.Contains(text, "[HOST TOOL RESULT]") {
+				toolMsg = text
+			}
 		}
 	}
-	if !strings.Contains(toolMsg, "Resultado da ferramenta bash") {
-		t.Fatalf("tool message missing  prefix: %q", toolMsg)
+	if !strings.Contains(toolMsg, "Tool: bash") {
+		t.Fatalf("tool message missing host-tool prefix: %q", toolMsg)
 	}
 	if !strings.Contains(toolMsg, "file1.py") {
 		t.Fatalf("tool message missing content: %q", toolMsg)
