@@ -779,7 +779,12 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			translated.AddMessage("user", "\n\n[HOST INTENT RETRY: Your previous reply only deferred the next step instead of completing the turn. Re-evaluate the user's intent from the full conversation. If real host/workspace action is required, emit the correct <tool_call> immediately. If the user only wants information/explanation, answer it fully now in text. Do not reply with another promise about what you will do later.]")
 		}
 
-		response, wsConn, _, status, err := conversationClientOrder(client, account, translated, *proxyUrl, false, *clientState, h.accountPool)
+		// Image turns can be handed off by ChatGPT from the HTTP SSE response to
+		// a Conduit WebSocket topic even though this handler buffers the upstream
+		// response before serializing it for OpenCode. Keep a WebSocket available
+		// for informational attachments so a valid handoff does not look like an
+		// empty model response and trigger repeated 500 retries.
+		response, wsConn, _, status, err := conversationClientOrder(client, account, translated, *proxyUrl, informationalAttachment, *clientState, h.accountPool)
 		if err != nil {
 			if progressStarted {
 				writeToolErrorSSE(c, err.Error())
