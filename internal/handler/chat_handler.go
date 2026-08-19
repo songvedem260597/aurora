@@ -730,7 +730,10 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			if recoveryRequired {
 				retrySuffix += "\nThe previous host tool FAILED. Do not retry the same stale patch blindly and do not claim success. First emit a REAL read/inspect tool call for the affected target so the host returns the current contents/state. On the following turn, use that real result to retry the edit safely."
 			} else if contentMutationRequired {
-				retrySuffix += "\nThis is a coding/content task. Setup-only actions such as mkdir/New-Item Directory, pwd, ls, tree, Test-Path, or empty placeholder files DO NOT count as completing the task. Emit a REAL write/edit/apply_patch tool call (or a shell command that writes actual file contents) for the requested game/app/web/code NOW. Do not stop after creating a directory."
+				retrySuffix += "\nThis is a coding/content task. Setup-only actions such as mkdir/New-Item Directory, pwd, ls, tree, Test-Path, skill/meta-guideline tools, or empty placeholder files DO NOT count as completing the task. Emit a REAL write/edit/apply_patch tool call (or a shell command that writes actual file contents) for the requested game/app/web/code NOW. Do not stop after setup or meta tools."
+				if mutationPrompt := toolcall.MutationToolsPrompt(tools); mutationPrompt != "" {
+					retrySuffix += "\nUse one of these ACTUAL mutation tools with its exact parameter schema; do not invent a tool name and do not answer in prose:\n" + mutationPrompt
+				}
 			} else if verificationRequired {
 				retrySuffix += "\nThe requested code/content has been changed, but the task is NOT complete until it is verified. Run a REAL verification tool now (for example read/check/test/run/open the produced artifact or execute an appropriate test command). Do not claim completion before the host returns the verification result."
 			} else if mutationRequired {

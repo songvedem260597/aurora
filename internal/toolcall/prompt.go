@@ -148,6 +148,27 @@ func FirstToolCallExample(tools []official.Tool, workingDir string) string {
 	return fmt.Sprintf(`<tool_call>{"name": %q, "arguments": {}}</tool_call>`, names[0])
 }
 
+// MutationToolsPrompt returns only the concrete host tools that can write or
+// edit workspace content. It is used after the model has already decided that
+// real host action is required, so this is protocol guidance rather than user
+// intent classification.
+func MutationToolsPrompt(tools []official.Tool) string {
+	filtered := make([]official.Tool, 0, len(tools))
+	for _, t := range tools {
+		if t.Type != "function" {
+			continue
+		}
+		name := strings.ToLower(t.Function.Name)
+		if name == "write" || name == "edit" || name == "apply_patch" || name == "patch" || name == "write_file" || name == "create_file" || name == "str_replace" || name == "replace" || strings.Contains(name, "write") || strings.Contains(name, "edit") || strings.Contains(name, "patch") {
+			filtered = append(filtered, t)
+		}
+	}
+	if len(filtered) == 0 {
+		return ""
+	}
+	return compactToolsPrompt(filtered)
+}
+
 func pickFirst(haystack []string, candidates []string) string {
 	for _, h := range haystack {
 		hl := strings.ToLower(h)

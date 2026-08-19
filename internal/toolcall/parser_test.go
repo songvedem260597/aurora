@@ -396,6 +396,21 @@ func TestFirstToolCallExamplePicksFirst(t *testing.T) {
 	}
 }
 
+func TestMutationToolsPromptFiltersMetaAndReadOnlyTools(t *testing.T) {
+	tools := []official.Tool{
+		{Type: "function", Function: official.ToolFunction{Name: "skill", Description: "Load guidance"}},
+		{Type: "function", Function: official.ToolFunction{Name: "read", Description: "Read file"}},
+		{Type: "function", Function: official.ToolFunction{Name: "apply_patch", Description: "Patch file", Parameters: []byte(`{"type":"object","properties":{"patchText":{"type":"string","description":"Patch text"}},"required":["patchText"]}`)}},
+	}
+	got := MutationToolsPrompt(tools)
+	if !strings.Contains(got, "apply_patch") || !strings.Contains(got, "patchText") {
+		t.Fatalf("mutation prompt missing actual mutation schema: %q", got)
+	}
+	if strings.Contains(got, "skill") || strings.Contains(got, "read:") {
+		t.Fatalf("mutation prompt must exclude meta/read-only tools: %q", got)
+	}
+}
+
 func TestExtractWorkingDir(t *testing.T) {
 	msgs := []official.APIMessage{
 		{Role: "user", Content: official.MessageContent{TextValue: "Working directory: /home/x"}},
