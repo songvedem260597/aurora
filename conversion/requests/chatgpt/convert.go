@@ -293,7 +293,7 @@ func enrichFiles(files []official_types.FileAttachment, client httpclient.Aurora
 func uploadInlineImage(file official_types.FileAttachment, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) (official_types.FileAttachment, error) {
 	src := file.Source
 	var data []byte
-	filename := strings.TrimSpace(fileName(file))
+	filename := normalizeUploadFilename(fileName(file))
 	contentType := strings.TrimSpace(fileMime(file))
 
 	if strings.HasPrefix(src, "data:") {
@@ -377,6 +377,21 @@ func uploadInlineImage(file official_types.FileAttachment, client httpclient.Aur
 		Height:        uploaded.Height,
 		LibraryFileID: uploaded.LibraryFileID,
 	}, nil
+}
+
+func normalizeUploadFilename(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if idx := strings.LastIndexAny(name, `/\\`); idx >= 0 && idx < len(name)-1 {
+		name = name[idx+1:]
+	}
+	name = strings.TrimSpace(name)
+	if name == "." || name == ".." {
+		return ""
+	}
+	return name
 }
 
 func guessFilenameFromURL(url string) string {

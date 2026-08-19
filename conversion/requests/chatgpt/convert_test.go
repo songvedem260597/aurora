@@ -272,6 +272,50 @@ func testHTTPResponse(status int, body string) *http.Response {
 	}
 }
 
+func TestNormalizeUploadFilenameStripsWindowsAndUnixPaths(t *testing.T) {
+	cases := map[string]string{
+		`C:\\Users\\uchih\\Downloads\\photo.jpg`: "photo.jpg",
+		`/home/user/photo.jpg`:                   "photo.jpg",
+		`photo.jpg`:                              "photo.jpg",
+	}
+	for input, want := range cases {
+		if got := normalizeUploadFilename(input); got != want {
+			t.Fatalf("normalizeUploadFilename(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestBuildMessagePartsUploadsOpenCodeWindowsPathFilename(t *testing.T) {
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	payload := `{
+		"role":"user",
+		"content":[
+			{"type":"text","text":"inspect this image"},
+			{"type":"file","mime":"image/png","filename":"C:\\\\Users\\\\uchih\\\\Downloads\\\\pixel.png","url":"` + dataURL + `"}
+		]
+	}`
+	var message official.APIMessage
+	if err := json.Unmarshal([]byte(payload), &message); err != nil {
+		t.Fatalf("unmarshal OpenCode message: %v", err)
+	}
+
+	client := &inlineUploadClient{}
+	account := accounts.NewAccount("test", accounts.TypeFree, "access-token")
+	if _, _, err := buildMessageParts(message, client, account, ""); err != nil {
+		t.Fatalf("build message parts: %v", err)
+	}
+	if len(client.requests) == 0 {
+		t.Fatal("expected upload create request")
+	}
+	var createPayload map[string]interface{}
+	if err := json.Unmarshal(client.requests[0].body, &createPayload); err != nil {
+		t.Fatalf("decode create upload payload: %v", err)
+	}
+	if createPayload["file_name"] != "pixel.png" {
+		t.Fatalf("create upload filename = %q, want basename pixel.png", createPayload["file_name"])
+	}
+}
+
 func TestBuildMessagePartsUploadsOpenCodeFileDataURL(t *testing.T) {
 	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	payload := `{
