@@ -480,6 +480,20 @@ func TestOriginalRequestHasFiles(t *testing.T) {
 	if original_requestHasFiles(req) {
 		t.Error("should be false when no files")
 	}
+
+	var openCodeReq officialtypes.APIRequest
+	if err := json.Unmarshal([]byte(`{
+		"model":"gpt-5-6",
+		"messages":[{"role":"user","content":[
+			{"type":"text","text":"What color is this image?"},
+			{"type":"file","mime":"image/png","url":"data:image/png;base64,AA==","filename":"aurora_vision_test.png"}
+		]}]
+	}`), &openCodeReq); err != nil {
+		t.Fatalf("unmarshal OpenCode file request: %v", err)
+	}
+	if !original_requestHasFiles(openCodeReq) {
+		t.Fatal("OpenCode type=file+url attachment must require a file-capable account")
+	}
 }
 
 // ─── Test: countMessagesTokens ───────────────────────────────────

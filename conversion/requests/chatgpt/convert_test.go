@@ -1,10 +1,14 @@
 package chatgpt
 
 import (
+	"aurora/httpclient"
 	"aurora/internal/accounts"
 	chatgpt_types "aurora/typings/chatgpt"
 	"aurora/typings/official"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -211,5 +215,153 @@ func TestConvertAPIRequestToolChoiceNoneStripsProtocol(t *testing.T) {
 	text, _ := out.Messages[0].Content.Parts[0].(string)
 	if !strings.Contains(text, "DISABLED tool calling") {
 		t.Fatalf("missing none-warning: %s", text)
+	}
+}
+
+type inlineUploadRequest struct {
+	method  httpclient.HttpMethod
+	url     string
+	headers httpclient.AuroraHeaders
+	body    []byte
+}
+
+type inlineUploadClient struct {
+	requests []inlineUploadRequest
+}
+
+func (c *inlineUploadClient) Request(method httpclient.HttpMethod, url string, headers httpclient.AuroraHeaders, _ []*http.Cookie, body io.Reader) (*http.Response, error) {
+	var data []byte
+	if body != nil {
+		var err error
+		data, err = io.ReadAll(body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	c.requests = append(c.requests, inlineUploadRequest{method: method, url: url, headers: headers, body: data})
+
+	switch len(c.requests) {
+	case 1:
+		return testHTTPResponse(http.StatusOK, `{"file_id":"file-uploaded","upload_url":"https://upload.example.test/blob","library_file_id":"library-uploaded"}`), nil
+	case 2:
+		return testHTTPResponse(http.StatusCreated, ""), nil
+	case 3:
+		return testHTTPResponse(http.StatusOK, `{}`), nil
+	default:
+		return nil, fmt.Errorf("unexpected upload request %s %s", method, url)
+	}
+}
+
+func (c *inlineUploadClient) SetProxy(string) error             { return nil }
+func (c *inlineUploadClient) SetCookies(string, []*http.Cookie) {}
+func (c *inlineUploadClient) GetCookies(string) []*http.Cookie  { return nil }
+
+func testHTTPResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestBuildMessagePartsUploadsOpenCodeFileDataURL(t *testing.T) {
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	payload := `{
+		"role":"user",
+		"content":[
+			{"type":"text","text":"inspect this image"},
+			{"type":"file","mime":"image/png","filename":"pixel.png","url":"` + dataURL + `"}
+		]
+	}`
+	var message official.APIMessage
+	if err := json.Unmarshal([]byte(payload), &message); err != nil {
+		t.Fatalf("unmarshal OpenCode message: %v", err)
+	}
+
+	client := &inlineUploadClient{}
+	account := accounts.NewAccount("test", accounts.TypeFree, "access-token")
+	parts, metadata := buildMessageParts(message, client, account, "")
+
+	if len(client.requests) != 3 {
+		t.Fatalf("upload request count = %d, want create + put + confirm; Files() = %#v", len(client.requests), message.Files())
+	}
+	if client.requests[0].method != httpclient.POST || !strings.HasSuffix(client.requests[0].url, "/files") {
+		t.Fatalf("create upload request = %s %s", client.requests[0].method, client.requests[0].url)
+	}
+	var createPayload map[string]interface{}
+	if err := json.Unmarshal(client.requests[0].body, &createPayload); err != nil {
+		t.Fatalf("decode create upload payload: %v", err)
+	}
+	if createPayload["file_name"] != "pixel.png" || createPayload["mime_type"] != "image/png" {
+		t.Fatalf("create upload payload lost OpenCode attachment metadata: %#v", createPayload)
+	}
+	if client.requests[1].method != httpclient.PUT || client.requests[1].url != "https://upload.example.test/blob" {
+		t.Fatalf("blob upload request = %s %s", client.requests[1].method, client.requests[1].url)
+	}
+	if len(client.requests[1].body) == 0 || !strings.HasPrefix(string(client.requests[1].body), "\x89PNG\r\n\x1a\n") {
+		t.Fatalf("blob upload body is not decoded PNG data: %x", client.requests[1].body)
+	}
+	if client.requests[1].headers["Content-Type"] != "image/png" {
+		t.Fatalf("blob Content-Type = %q, want image/png", client.requests[1].headers["Content-Type"])
+	}
+	if client.requests[2].method != httpclient.POST || !strings.HasSuffix(client.requests[2].url, "/files/file-uploaded/uploaded") {
+		t.Fatalf("confirm upload request = %s %s", client.requests[2].method, client.requests[2].url)
+	}
+
+	if len(parts) < 1 {
+		t.Fatal("converter returned no content parts")
+	}
+	imagePart, ok := parts[0].(map[string]interface{})
+	if !ok || imagePart["asset_pointer"] != "file-service://file-uploaded" {
+		t.Fatalf("image part = %#v, want uploaded file-service pointer", parts[0])
+	}
+	if metadata == nil {
+		t.Fatal("converter dropped attachment metadata")
+	}
+	attachments, ok := metadata["attachments"].([]interface{})
+	if !ok || len(attachments) != 1 {
+		t.Fatalf("attachments = %#v, want one uploaded attachment", metadata["attachments"])
+	}
+	attachment := attachments[0].(map[string]interface{})
+	if attachment["id"] != "file-uploaded" || attachment["mime_type"] != "image/png" {
+		t.Fatalf("unexpected uploaded attachment: %#v", attachment)
+	}
+}
+
+func TestBuildMessagePartsUploadsOpenCodeImageURLWireFormat(t *testing.T) {
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	payload := `{
+		"role":"user",
+		"content":[
+			{"type":"text","text":"inspect this image"},
+			{"type":"image_url","image_url":{"url":"` + dataURL + `"}}
+		]
+	}`
+	var message official.APIMessage
+	if err := json.Unmarshal([]byte(payload), &message); err != nil {
+		t.Fatalf("unmarshal OpenCode wire message: %v", err)
+	}
+
+	client := &inlineUploadClient{}
+	account := accounts.NewAccount("test", accounts.TypeFree, "access-token")
+	parts, metadata := buildMessageParts(message, client, account, "")
+
+	if len(client.requests) != 3 {
+		t.Fatalf("upload request count = %d, want create + put + confirm", len(client.requests))
+	}
+	var createPayload map[string]interface{}
+	if err := json.Unmarshal(client.requests[0].body, &createPayload); err != nil {
+		t.Fatalf("decode create upload payload: %v", err)
+	}
+	if createPayload["file_name"] != "image.png" || createPayload["mime_type"] != "image/png" {
+		t.Fatalf("unexpected image_url upload metadata: %#v", createPayload)
+	}
+	imagePart, ok := parts[0].(map[string]interface{})
+	if !ok || imagePart["asset_pointer"] != "file-service://file-uploaded" {
+		t.Fatalf("image part = %#v, want uploaded file-service pointer", parts[0])
+	}
+	attachments, ok := metadata["attachments"].([]interface{})
+	if !ok || len(attachments) != 1 {
+		t.Fatalf("attachments = %#v, want one uploaded attachment", metadata["attachments"])
 	}
 }

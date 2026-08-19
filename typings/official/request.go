@@ -189,6 +189,10 @@ type MessageContentPart struct {
 	Type     string          `json:"type"`
 	Text     string          `json:"text,omitempty"`
 	ImageURL *ImageURLDetail `json:"image_url,omitempty"`
+	// URL and Mime are emitted by OpenCode for --file attachments, e.g.
+	// {"type":"file","url":"data:image/png;base64,...","mime":"image/png"}.
+	URL      string          `json:"url,omitempty"`
+	Mime     string          `json:"mime,omitempty"`
 	FileID   string          `json:"file_id,omitempty"`
 	FileName string          `json:"filename,omitempty"`
 	Name     string          `json:"name,omitempty"`
@@ -291,7 +295,44 @@ func (c MessageContent) Files() []FileAttachment {
 			continue
 		}
 		if part.File != nil {
-			files = append(files, *part.File)
+			file := *part.File
+			if file.Source == "" {
+				file.Source = strings.TrimSpace(part.URL)
+			}
+			if file.ID == "" && file.FileID == "" && file.Source != "" {
+				file.ID = file.Source
+				file.FileID = file.Source
+			}
+			if file.Name == "" && file.FileName == "" && file.Filename == "" {
+				file.Name = firstNonEmpty(part.Name, part.FileName)
+				file.FileName = firstNonEmpty(part.FileName, part.Name)
+				file.Filename = firstNonEmpty(part.FileName, part.Name)
+			}
+			if file.MimeType == "" && file.MIMEType == "" {
+				mime := firstNonEmpty(part.Mime, part.MimeType, part.MIMEType)
+				file.MimeType = mime
+				file.MIMEType = mime
+			}
+			files = append(files, file)
+			continue
+		}
+		source := strings.TrimSpace(part.URL)
+		if source != "" {
+			filename := firstNonEmpty(part.FileName, part.Name, guessImageFilename(source))
+			mime := firstNonEmpty(part.Mime, part.MimeType, part.MIMEType, guessImageMime(source))
+			files = append(files, FileAttachment{
+				ID:       source,
+				FileID:   source,
+				Name:     filename,
+				FileName: filename,
+				Filename: filename,
+				MimeType: mime,
+				MIMEType: mime,
+				Size:     part.Size,
+				Width:    part.Width,
+				Height:   part.Height,
+				Source:   source,
+			})
 			continue
 		}
 		fileID := strings.TrimSpace(part.FileID)
@@ -315,7 +356,16 @@ func (c MessageContent) Files() []FileAttachment {
 
 func guessImageFilename(url string) string {
 	if strings.HasPrefix(url, "data:") {
-		return "image.png"
+		switch strings.ToLower(guessImageMime(url)) {
+		case "image/jpeg":
+			return "image.jpg"
+		case "image/webp":
+			return "image.webp"
+		case "image/gif":
+			return "image.gif"
+		default:
+			return "image.png"
+		}
 	}
 	idx := strings.LastIndex(url, "/")
 	if idx >= 0 && idx < len(url)-1 {

@@ -14,6 +14,7 @@ Aurora 将 ChatGPT Web 后端能力转换为类 OpenAI API，支持聊天、Resp
 - 工具调用 (Tool Calling) 模拟 — ChatGPT Web 不原生支持 function calling，Aurora 通过 `<tool_call>` 文本协议模拟该能力，支持 `tools`/`tool_choice` 字段，自动注入 system prompt 并解析模型输出中的 `<tool_call>` 块为标准 OpenAI 格式的 `tool_calls`。
 - OpenAI 风格的 `/v1/responses`，支持字符串输入、消息数组、`instructions`、流式事件，以及 `reasoning.effort`/`text.query.format`/`temperature` 等参数。
 - `/v1/files` 文件上传，上传后可在聊天或 Responses 请求中携带 `file_id` 做文件问答。
+- 兼容 OpenCode `--file` 的 `type:file + url` data URL 附件，会自动上传图片并传给 ChatGPT vision。
 - `/v1/images/generations` 图片生成，模型列表包含 `gpt-image-2`，支持 SSE 流式返回，支持 URL 或 `b64_json`。
 - `/v1/images/edits` 改图 + `/v1/images/variations` 图生图（变体）。
 - `/v1/audio/speech` 语音合成（TTS），兼容常见 OpenAI voice 和输出格式。

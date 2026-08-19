@@ -239,7 +239,8 @@ func enrichFiles(files []official_types.FileAttachment, client httpclient.Aurora
 			continue
 		}
 
-		// 处理 image_url 的 inline 数据(data: URL 或 http URL)
+		// 处理 image_url 和 OpenCode type=file+url 的 inline 数据
+		// (data: URL 或 http URL)。
 		if file.Source != "" && client != nil && account != nil {
 			if uploaded, ok := uploadInlineImage(file, client, account, proxy); ok {
 				file = uploaded
@@ -248,7 +249,6 @@ func enrichFiles(files []official_types.FileAttachment, client httpclient.Aurora
 				continue
 			}
 		}
-
 		if uploaded, ok := backendchatgpt.LookupUploadedFile(fileID(file)); ok {
 			if file.ID == "" {
 				file.ID = uploaded.ID
@@ -282,8 +282,8 @@ func enrichFiles(files []official_types.FileAttachment, client httpclient.Aurora
 func uploadInlineImage(file official_types.FileAttachment, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) (official_types.FileAttachment, bool) {
 	src := file.Source
 	var data []byte
-	var filename string
-	var contentType string
+	filename := strings.TrimSpace(fileName(file))
+	contentType := strings.TrimSpace(fileMime(file))
 
 	if strings.HasPrefix(src, "data:") {
 		// data:image/png;base64,iVBOR...
@@ -295,7 +295,9 @@ func uploadInlineImage(file official_types.FileAttachment, client httpclient.Aur
 		b64data := src[commaIdx+1:]
 		// 提取 mime type
 		if semiIdx := strings.Index(meta, ";"); semiIdx > 5 {
-			contentType = meta[5:semiIdx]
+			if inlineType := strings.TrimSpace(meta[5:semiIdx]); inlineType != "" {
+				contentType = inlineType
+			}
 		}
 		var err error
 		data, err = base64.StdEncoding.DecodeString(b64data)
@@ -306,7 +308,9 @@ func uploadInlineImage(file official_types.FileAttachment, client httpclient.Aur
 				return file, false
 			}
 		}
-		filename = "image.png"
+		if filename == "" {
+			filename = "image.png"
+		}
 		if contentType == "" {
 			contentType = "image/png"
 		}
@@ -324,8 +328,12 @@ func uploadInlineImage(file official_types.FileAttachment, client httpclient.Aur
 		if err != nil {
 			return file, false
 		}
-		contentType = resp.Header.Get("Content-Type")
-		filename = guessFilenameFromURL(src)
+		if contentType == "" {
+			contentType = resp.Header.Get("Content-Type")
+		}
+		if filename == "" {
+			filename = guessFilenameFromURL(src)
+		}
 	} else {
 		return file, false
 	}
