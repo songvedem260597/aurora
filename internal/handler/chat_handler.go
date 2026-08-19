@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -689,6 +690,17 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	if requireToolCall && maxRefusalRetries > 2 {
 		maxRefusalRetries = 2
 	}
+	progressStarted := false
+	if streamRequested {
+		status := "⏳ Waiting for Aurora..."
+		if len(originalRequest.Messages) > 0 && originalRequest.Messages[len(originalRequest.Messages)-1].IsToolResult() {
+			status = "✅ Previous tool finished — checking the real result and deciding the next step..."
+		} else if requireToolCall {
+			status = "⏳ Action task detected — waiting for Aurora to choose a real tool..."
+		}
+		beginToolProgressSSE(c, *reqModel, status)
+		progressStarted = true
+	}
 	if logPath := h.cfg.DebugToolLog; logPath != "" {
 		debugText := fmt.Sprintf("require_tool_call=%v messages=%d", requireToolCall, len(originalRequest.Messages))
 		if len(originalRequest.Messages) > 0 {
@@ -699,6 +711,9 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	}
 
 	for attempt := 0; attempt < maxRefusalRetries; attempt++ {
+		if progressStarted && attempt > 0 {
+			writeToolProgressSSE(c, *reqModel, "↻ Previous response did not execute a real tool — retrying tool selection...")
+		}
 		translated := baseTranslated
 		if attempt > 0 || requireToolCall {
 			retrySuffix := "\n\n[HOST TOOL PROTOCOL OVERRIDE: Do NOT look for a native ChatGPT bash/shell/file tool. The surrounding OpenCode host intercepts <tool_call> blocks from your TEXT response and executes them on the user's REAL machine. Your job is only to emit the protocol block; the host performs the command and sends the real result back on the next turn. Therefore never say the tool is unavailable, never guess command output or paths, and never describe what you plan to inspect. Respond with ONLY one or more <tool_call> blocks, starting immediately with '<tool_call>'.]"
@@ -718,6 +733,10 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 
 		response, wsConn, _, status, err := conversationClientOrder(client, account, translated, *proxyUrl, false, *clientState, h.accountPool)
 		if err != nil {
+			if progressStarted {
+				writeToolErrorSSE(c, err.Error())
+				return
+			}
 			c.JSON(status, gin.H{"error": gin.H{
 				"message": err.Error(),
 				"type":    "request_conversion_error",
@@ -759,6 +778,9 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			appendToolDebugLog(logPath, attempt, result.Text, calls)
 		}
 		if len(calls) > 0 {
+			if progressStarted {
+				writeToolProgressSSE(c, *reqModel, toolProgressSummary(calls))
+			}
 			lastToolCalls = calls
 			break
 		}
@@ -776,7 +798,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 
 	if len(lastToolCalls) > 0 {
 		if streamRequested {
-			writeToolCallingSSE(c, "", lastToolCalls, *reqModel, lastConversationID)
+			writeToolCallingSSE(c, "", lastToolCalls, *reqModel, lastConversationID, progressStarted)
 			return
 		}
 		c.JSON(200, officialtypes.NewChatCompletionWithToolCalls(
@@ -787,6 +809,10 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		return
 	}
 	if requireToolCall {
+		if progressStarted {
+			writeToolErrorSSE(c, "action required a real tool call, but the model did not execute one")
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
 			"message": "action required a real tool call, but the model did not execute one",
 			"type":    "tool_call_error",
@@ -796,29 +822,34 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	}
 	outputTokens := util.CountToken(lastText)
 	if streamRequested {
-		writeToolCallingSSE(c, lastText, nil, *reqModel, lastConversationID)
+		if progressStarted {
+			writeToolProgressSSE(c, *reqModel, "✅ No more tools required — finishing the response...")
+		}
+		writeToolCallingSSE(c, lastText, nil, *reqModel, lastConversationID, progressStarted)
 		return
 	}
 	c.JSON(200, officialtypes.NewChatCompletionWithMetadata(lastText, *inputTokens, outputTokens, *reqModel, lastConversationID, lastSentinel))
 }
 
-func writeToolCallingSSE(c *gin.Context, text string, calls []officialtypes.ToolCall, model, conversationID string) {
+func writeToolCallingSSE(c *gin.Context, text string, calls []officialtypes.ToolCall, model, conversationID string, progressStarted bool) {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 
-	roleChunk := officialtypes.ChatCompletionChunk{
-		ID:      "chatcmpl-QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
-		Object:  "chat.completion.chunk",
-		Created: 0,
-		Model:   model,
-		Choices: []officialtypes.Choices{{
-			Index: 0,
-			Delta: officialtypes.Delta{Role: "assistant"},
-		}},
+	if !progressStarted {
+		roleChunk := officialtypes.ChatCompletionChunk{
+			ID:      "chatcmpl-QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK",
+			Object:  "chat.completion.chunk",
+			Created: 0,
+			Model:   model,
+			Choices: []officialtypes.Choices{{
+				Index: 0,
+				Delta: officialtypes.Delta{Role: "assistant"},
+			}},
+		}
+		c.Writer.WriteString("data: " + roleChunk.String() + "\n\n")
 	}
-	c.Writer.WriteString("data: " + roleChunk.String() + "\n\n")
 
 	if len(calls) > 0 {
 		deltas := make([]officialtypes.ToolCallDelta, 0, len(calls))
@@ -850,6 +881,40 @@ func writeToolCallingSSE(c *gin.Context, text string, calls []officialtypes.Tool
 	c.Writer.Flush()
 }
 
+func beginToolProgressSSE(c *gin.Context, model, status string) {
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	chunk := officialtypes.ChatCompletionChunk{
+		ID: "chatcmpl-QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK", Object: "chat.completion.chunk", Created: 0, Model: model,
+		Choices: []officialtypes.Choices{{Index: 0, Delta: officialtypes.Delta{Role: "assistant", ReasoningContent: status + "\n"}}},
+	}
+	c.Writer.WriteString("data: " + chunk.String() + "\n\n")
+	c.Writer.Flush()
+}
+
+func writeToolProgressSSE(c *gin.Context, model, status string) {
+	chunk := officialtypes.NewReasoningChunk(status+"\n", model)
+	c.Writer.WriteString("data: " + chunk.String() + "\n\n")
+	c.Writer.Flush()
+}
+func writeToolErrorSSE(c *gin.Context, message string) {
+	payload, _ := json.Marshal(gin.H{"error": gin.H{"message": message, "type": "tool_call_error"}})
+	c.Writer.WriteString("data: " + string(payload) + "\n\n")
+	c.Writer.WriteString("data: [DONE]\n\n")
+	c.Writer.Flush()
+}
+func toolProgressSummary(calls []officialtypes.ToolCall) string {
+	if len(calls) == 0 {
+		return "🔧 Tool requested"
+	}
+	parts := make([]string, 0, len(calls))
+	for _, call := range calls {
+		parts = append(parts, "🔧 Tool requested: "+call.Function.Name+" — command/target is shown in the tool row below")
+	}
+	return strings.Join(parts, "\n")
+}
 func (h *ChatHandler) ChatGPTConversation(c *gin.Context) {
 	var original_request chatgpt_types.ChatGPTRequest
 	if err := c.BindJSON(&original_request); err != nil {
