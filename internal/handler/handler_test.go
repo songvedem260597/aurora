@@ -192,6 +192,26 @@ func TestToolResultAllowsFollowupAnswer(t *testing.T) {
 	}
 }
 
+func TestFallbackToolCallsUsesSafeReadOnlyFirstStep(t *testing.T) {
+	tools := []officialtypes.Tool{{
+		Type: "function",
+		Function: officialtypes.ToolFunction{
+			Name:       "bash",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+		},
+	}}
+	calls := fallbackToolCalls(tools, []officialtypes.APIMessage{{Role: "user", Content: officialtypes.MessageContent{TextValue: "fix the repo"}}})
+	if len(calls) != 1 {
+		t.Fatalf("expected one fallback tool call, got %d", len(calls))
+	}
+	if calls[0].Function.Name != "bash" {
+		t.Fatalf("fallback tool = %q, want bash", calls[0].Function.Name)
+	}
+	if !strings.Contains(calls[0].Function.Arguments, "Get-ChildItem -Force") {
+		t.Fatalf("fallback arguments = %q, want read-only workspace listing", calls[0].Function.Arguments)
+	}
+}
+
 // ─── Test: original_requestHasFiles ──────────────────────────────
 
 func TestOriginalRequestHasFiles(t *testing.T) {

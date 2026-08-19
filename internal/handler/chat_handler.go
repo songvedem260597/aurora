@@ -765,6 +765,13 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		}
 	}
 
+	if len(lastToolCalls) == 0 && requireToolCall {
+		lastToolCalls = fallbackToolCalls(tools, originalRequest.Messages)
+		if len(lastToolCalls) > 0 {
+			lastText = ""
+			fmt.Fprintln(os.Stderr, "[chatgpt] model did not emit a tool call; using safe host-tool fallback")
+		}
+	}
 	if len(lastToolCalls) > 0 {
 		if streamRequested {
 			writeToolCallingSSE(c, "", lastToolCalls, *reqModel, lastConversationID)
@@ -779,7 +786,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	}
 	if requireToolCall {
 		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
-			"message": "model failed to produce a valid tool call after retries",
+			"message": "model failed to produce a valid tool call and no safe fallback tool was available",
 			"type":    "tool_call_error",
 			"code":    "missing_tool_call",
 		}})
@@ -791,6 +798,23 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		return
 	}
 	c.JSON(200, officialtypes.NewChatCompletionWithMetadata(lastText, *inputTokens, outputTokens, *reqModel, lastConversationID, lastSentinel))
+}
+
+func fallbackToolCalls(tools []officialtypes.Tool, messages []officialtypes.APIMessage) []officialtypes.ToolCall {
+	example := toolcall.FirstToolCallExample(tools, toolcall.ExtractWorkingDir(messages))
+	if example == "" {
+		return nil
+	}
+	parser := toolcall.NewParser()
+	_, calls := parser.Feed(example)
+	if len(calls) == 0 {
+		_, extra := parser.Flush()
+		calls = append(calls, extra...)
+	}
+	for i := range calls {
+		calls[i].Index = i
+	}
+	return calls
 }
 
 func writeToolCallingSSE(c *gin.Context, text string, calls []officialtypes.ToolCall, model, conversationID string) {
