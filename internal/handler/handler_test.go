@@ -95,6 +95,99 @@ func TestRequestToolCallingEnabledHonorsNone(t *testing.T) {
 	}
 }
 
+func TestPrepareDirectNoToolRequestHonorsForcedNone(t *testing.T) {
+	req := &officialtypes.APIRequest{
+		Tools:             []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		ToolChoice:        &officialtypes.ToolChoice{Type: "none"},
+		ParallelToolCalls: new(bool),
+		Messages: []officialtypes.APIMessage{
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "first"}},
+			{Role: "assistant", Content: officialtypes.MessageContent{TextValue: "reply"}},
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "second"}},
+		},
+	}
+	if !prepareDirectNoToolRequest(req) {
+		t.Fatal("tool_choice=none must always take the no-tool path")
+	}
+	if len(req.Tools) != 0 || req.ToolChoice != nil || req.ParallelToolCalls != nil {
+		t.Fatalf("tool fields were not cleared: %#v", req)
+	}
+	if len(req.Messages) != 3 {
+		t.Fatal("no-tool preparation must preserve the conversation")
+	}
+}
+
+func TestPrepareDirectNoToolRequestRoutesStandaloneInformation(t *testing.T) {
+	req := &officialtypes.APIRequest{
+		Tools:      []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		ToolChoice: &officialtypes.ToolChoice{Type: "auto"},
+		Messages: []officialtypes.APIMessage{
+			{Role: "system", Content: officialtypes.MessageContent{TextValue: "Answer concisely."}},
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "Thủ đô Việt Nam là gì?"}},
+		},
+	}
+	if !prepareDirectNoToolRequest(req) {
+		t.Fatal("a standalone knowledge question must bypass tool emulation")
+	}
+	if len(req.Tools) != 0 || len(req.Messages) != 2 {
+		t.Fatalf("unexpected prepared request: %#v", req)
+	}
+}
+
+func TestPrepareDirectNoToolRequestKeepsAmbiguousHostTurns(t *testing.T) {
+	tests := []struct {
+		name     string
+		choice   *officialtypes.ToolChoice
+		messages []officialtypes.APIMessage
+	}{
+		{
+			name:   "required",
+			choice: &officialtypes.ToolChoice{Type: "required"},
+			messages: []officialtypes.APIMessage{{Role: "user", Content: officialtypes.MessageContent{
+				TextValue: "Answer this question.",
+			}}},
+		},
+		{
+			name:   "explicit bash",
+			choice: &officialtypes.ToolChoice{Type: "auto"},
+			messages: []officialtypes.APIMessage{{Role: "user", Content: officialtypes.MessageContent{
+				TextValue: "Dùng bash chạy lệnh pwd.",
+			}}},
+		},
+		{
+			name:   "host file reference",
+			choice: &officialtypes.ToolChoice{Type: "auto"},
+			messages: []officialtypes.APIMessage{{Role: "user", Content: officialtypes.MessageContent{
+				TextValue: "What does the README.md file contain?",
+			}}},
+		},
+		{
+			name:   "conversation followup",
+			choice: &officialtypes.ToolChoice{Type: "auto"},
+			messages: []officialtypes.APIMessage{
+				{Role: "user", Content: officialtypes.MessageContent{TextValue: "Inspect the repository."}},
+				{Role: "assistant", Content: officialtypes.MessageContent{TextValue: "What should I inspect?"}},
+				{Role: "user", Content: officialtypes.MessageContent{TextValue: "Dependencies."}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &officialtypes.APIRequest{
+				Tools:      []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+				ToolChoice: tt.choice,
+				Messages:   tt.messages,
+			}
+			if prepareDirectNoToolRequest(req) {
+				t.Fatal("host-dependent or non-standalone turn must keep tool emulation")
+			}
+			if len(req.Tools) != 1 {
+				t.Fatal("rejected fast path mutated the request")
+			}
+		})
+	}
+}
+
 func TestShouldRequireToolCallForDeferredWorkspaceAction(t *testing.T) {
 	req := &officialtypes.APIRequest{
 		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},

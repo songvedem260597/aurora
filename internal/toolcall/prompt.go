@@ -18,34 +18,19 @@ func BuildInstructions(tools []official.Tool, toolChoice *official.ToolChoice) s
 	}
 	var sb strings.Builder
 	sb.WriteString("# TOOLS AVAILABLE\n")
-	sb.WriteString("You have access to the following tools. Use the EXACT tool name from the list below — do NOT rename, abbreviate or invent names.\n\n")
+	sb.WriteString("These tools run on the user's host. Use only the exact names and parameters listed here.\n")
 	sb.WriteString(compactToolsPrompt(tools))
-	sb.WriteString("\n\n# TOOL CALLING FORMAT (MANDATORY)\n")
-	sb.WriteString("To call a tool, output a JSON object wrapped EXACTLY in these tags:\n")
-	sb.WriteString("<tool_call>\n")
-	sb.WriteString(`{"name": "tool_name", "arguments": {"param_name": "value"}}`)
-	sb.WriteString("\n</tool_call>\n\n")
-	sb.WriteString("EXAMPLE OF MULTIPLE TOOL CALLS (replace <tool_name> with a REAL name from the list above):\n")
-	sb.WriteString("<tool_call>\n")
-	sb.WriteString(`{"name": "<tool_name>", "arguments": {"arg1": "value1"}}`)
-	sb.WriteString("\n</tool_call>\n")
-	sb.WriteString("<tool_call>\n")
-	sb.WriteString(`{"name": "<tool_name>", "arguments": {"arg1": "value2"}}`)
-	sb.WriteString("\n</tool_call>\n\n")
-	sb.WriteString("CRITICAL RULES:\n")
-	sb.WriteString("0. Use ONLY the EXACT tool names listed under TOOLS AVAILABLE. Never rename, abbreviate or invent names. If the available tool is \"read\", do NOT call \"read_file\". Copy the name character-for-character.\n")
-	sb.WriteString("1. ONLY use the tags above for tool calling. NEVER output raw JSON without tags.\n")
-	sb.WriteString("2. You can call multiple tools by emitting multiple <tool_call> blocks consecutively.\n")
-	sb.WriteString("3. Do NOT output any other text after your <tool_call> blocks. Wait for the tool response.\n")
-	sb.WriteString("4. The JSON inside the tags MUST be valid and include the 'arguments' field.\n")
-	sb.WriteString("5. If you need to use a tool, do it IMMEDIATELY without preamble.\n")
-	sb.WriteString("6. DO NOT use your internal/native Python tool, Advanced Data Analysis, or Code Interpreter. They run in a remote sandbox on your servers and have NO access to the user's workspace. You MUST use ONLY the custom tools listed under TOOLS AVAILABLE (like 'glob', 'read', 'grep', or 'bash').\n")
+	sb.WriteString("\n# TOOL CALLING FORMAT\n")
+	sb.WriteString(`<tool_call>{"name":"exact_tool_name","arguments":{"param":"value"}}</tool_call>`)
+	sb.WriteString("\nUse valid JSON and include arguments. Emit one block per call; independent calls may be consecutive. When calling tools, output only tool-call blocks with no prose. Never use an internal sandbox in place of these host tools.\n")
 	if forced := toolChoice.ForcedFunctionName(); forced != "" {
-		fmt.Fprintf(&sb, "\nCRITICAL: You MUST call the tool %q in this response. Do not call any other tool, and do not produce a final answer without calling it first.\n", forced)
+		fmt.Fprintf(&sb, "MUST call the tool %q now; do not call another tool or answer first.\n", forced)
 	} else if toolChoice != nil && toolChoice.IsForcedNone() {
-		sb.WriteString("\nCRITICAL: The user has DISABLED tool calling in this request. Do not emit any <tool_call> blocks. Just answer in plain text.\n")
+		sb.WriteString("DISABLED tool calling: answer in plain text and emit no tool-call block.\n")
 	} else if toolChoice != nil && toolChoice.RequiresCall() {
-		sb.WriteString("\nCRITICAL: You MUST call at least one available tool in this response. Do not produce a final answer before calling a tool.\n")
+		sb.WriteString("MUST call at least one listed tool now; do not answer first.\n")
+	} else {
+		sb.WriteString("Tools are optional. For an informational question that needs no host access, answer normally without a tool call.\n")
 	}
 	return sb.String()
 }
@@ -62,7 +47,7 @@ func compactToolsPrompt(tools []official.Tool) string {
 			sb.WriteByte('\n')
 			continue
 		}
-		fmt.Fprintf(&sb, "- %s: %s\n", t.Function.Name, t.Function.Description)
+		fmt.Fprintf(&sb, "- %s: %s\n", t.Function.Name, compactPromptText(t.Function.Description, 240))
 		var schema struct {
 			Type       string                    `json:"type"`
 			Properties map[string]map[string]any `json:"properties"`
@@ -91,6 +76,7 @@ func compactToolsPrompt(tools []official.Tool) string {
 				}
 			}
 			desc, _ := prop["description"].(string)
+			desc = compactPromptText(desc, 160)
 			typeStr, _ := prop["type"].(string)
 			if typeStr == "" {
 				typeStr = "string"
@@ -113,6 +99,21 @@ func compactToolsPrompt(tools []official.Tool) string {
 		}
 	}
 	return sb.String()
+}
+
+// compactPromptText keeps client-provided descriptions useful without letting
+// verbose SDK metadata dominate every upstream turn. Limits are rune-based so
+// multilingual descriptions are not split in the middle of a UTF-8 sequence.
+func compactPromptText(text string, maxRunes int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) <= maxRunes {
+		return text
+	}
+	return strings.TrimSpace(string(runes[:maxRunes])) + "…"
 }
 
 // FirstToolCallExample 根据 tools 列表的语义,生成一个具体的"先做这个"示例,
@@ -210,7 +211,7 @@ func FinalNudge(tools []official.Tool, messages []official.APIMessage, toolChoic
 	switch last.Role {
 	case "tool", "function":
 		// 拿不到具体的 tool 名(API 没有 tool_call_id 映射),用一个通用表达
-		return "\n[SYSTEM INSTRUCTION: The 'Tool (...)' block above is the REAL output produced by running your tool call on the user's actual machine. Treat it as ground truth and as the current state of the workspace. Continue the task based strictly on it: call another tool using the exact <tool_call>{...}</tool_call> format if you need more information, or give your final answer. NEVER claim a directory or file does not exist, or that you are in a different/isolated environment, when it appears in the output above.]"
+		return "\n[SYSTEM: The Tool block above is real host output and ground truth. Use it to answer, or emit another exact <tool_call> block only if more host work is needed.]"
 	case "user":
 		forced := toolChoice != nil && toolChoice.RequiresCall()
 		if !forced {
@@ -223,16 +224,12 @@ func FinalNudge(tools []official.Tool, messages []official.APIMessage, toolChoic
 			wdPart = fmt.Sprintf(" (working directory: %s)", wd)
 		}
 		var sb strings.Builder
-		sb.WriteString("\n[SYSTEM INSTRUCTION — READ CAREFULLY:\n")
-		sb.WriteString("You are an autonomous coding agent. In THIS session you have NO Python sandbox, NO Code Interpreter, and NO filesystem of your own. There is no environment for you to 'look around' — attempting it finds nothing and is always WRONG. The ONLY way to see or touch the user's files is to emit a <tool_call>. The tool runs on the user's REAL machine")
+		sb.WriteString("\n[SYSTEM: Host access is available only through the listed <tool_call> protocol")
 		sb.WriteString(wdPart)
-		sb.WriteString(" and its result comes back to you on the next turn.\n")
-		sb.WriteString("Your reply to this message MUST be EXACTLY one or more <tool_call> blocks and NOTHING ELSE — no prose, no explanation, no description of any filesystem, no conclusions. Begin your reply immediately with the characters '<tool_call>'. Do NOT claim that anything exists or does not exist until you have called a tool and seen its result.\n")
+		sb.WriteString(". Reply now with only one or more valid <tool_call> blocks; no prose and no guessed host state.\n")
 		if example != "" {
-			sb.WriteString("Make your first call now, for example:\n")
+			sb.WriteString("Valid shape: ")
 			sb.WriteString(example)
-		} else {
-			sb.WriteString("Make your first tool call now.")
 		}
 		sb.WriteString("]\n")
 		return sb.String()

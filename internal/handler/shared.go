@@ -439,6 +439,88 @@ func latestUserAttachmentAllowsTextAnswer(messages []officialtypes.APIMessage) b
 		!conversationRequiresContentWork(messages)
 }
 
+// prepareDirectNoToolRequest removes tool emulation only when the OpenAI
+// contract or the request shape proves that host access is unnecessary.
+// tool_choice=none is authoritative. The auto case is intentionally narrow:
+// one standalone informational user turn, no attachment, no action/content
+// signal, and no reference to host state. Ambiguous or conversational turns
+// stay on the semantic tool path.
+func prepareDirectNoToolRequest(request *officialtypes.APIRequest) bool {
+	if request == nil || len(request.Tools) == 0 {
+		return false
+	}
+	if request.ToolChoice != nil && request.ToolChoice.IsForcedNone() {
+		clearRequestTools(request)
+		return true
+	}
+	if request.ToolChoice != nil {
+		choice := strings.ToLower(strings.TrimSpace(request.ToolChoice.Type))
+		if choice != "" && choice != "auto" {
+			return false
+		}
+	}
+	if latestUserHasAttachment(request.Messages) || !isStandaloneUserTurn(request.Messages) {
+		return false
+	}
+	if userExplicitlyRequestsTool(request.Messages) ||
+		conversationRequestsAction(request.Messages) ||
+		conversationRequestsMutation(request.Messages) ||
+		conversationRequiresContentWork(request.Messages) {
+		return false
+	}
+	userIndex := lastUserIndex(request.Messages)
+	if userIndex < 0 || latestTurnReferencesHostState(request.Messages[userIndex].Text()) {
+		return false
+	}
+	clearRequestTools(request)
+	return true
+}
+
+func clearRequestTools(request *officialtypes.APIRequest) {
+	request.Tools = nil
+	request.ToolChoice = nil
+	request.ParallelToolCalls = nil
+}
+
+func isStandaloneUserTurn(messages []officialtypes.APIMessage) bool {
+	users := 0
+	for _, message := range messages {
+		switch message.Role {
+		case "user":
+			users++
+		case "system", "developer":
+			// System/developer instructions do not make the user turn depend on
+			// prior tool state and must still be preserved upstream.
+		default:
+			return false
+		}
+	}
+	return users == 1
+}
+
+func latestTurnReferencesHostState(text string) bool {
+	normalized := normalizeIntentText(text)
+	for _, marker := range []string{
+		"file", "folder", "directory", "workspace", "repo", "repository",
+		"project", "codebase", "terminal", "shell", "command", "path",
+		"branch", "git", "database", "log file",
+		"tep", "thu muc", "duong dan", "ma nguon", "co so du lieu",
+	} {
+		if containsIntentWord(normalized, marker) {
+			return true
+		}
+	}
+	if strings.Contains(text, `\`) || strings.Contains(text, "/") {
+		return true
+	}
+	for _, ext := range []string{".json", ".md", ".txt", ".yaml", ".yml", ".toml", ".xml", ".env"} {
+		if containsFileExtension(strings.ToLower(text), ext) {
+			return true
+		}
+	}
+	return false
+}
+
 func prepareDirectInformationalAttachment(request *officialtypes.APIRequest) bool {
 	if request == nil || !latestUserAttachmentAllowsTextAnswer(request.Messages) {
 		return false
@@ -447,9 +529,7 @@ func prepareDirectInformationalAttachment(request *officialtypes.APIRequest) boo
 	if userIndex < 0 {
 		return false
 	}
-	request.Tools = nil
-	request.ToolChoice = nil
-	request.ParallelToolCalls = nil
+	clearRequestTools(request)
 	// A standalone description of the image needs only the current attached
 	// turn. Keeping OpenCode's old Build-agent system prompt and prior tool
 	// transcript can add tens of thousands of tokens to an otherwise tiny
@@ -474,9 +554,7 @@ func toolUpstreamRequest(request *officialtypes.APIRequest) (officialtypes.APIRe
 	if !latestUserAttachmentAllowsTextAnswer(request.Messages) {
 		return prepared, false
 	}
-	prepared.Tools = nil
-	prepared.ToolChoice = nil
-	prepared.ParallelToolCalls = nil
+	clearRequestTools(&prepared)
 	prepared.Messages = compactUpstreamHistory(request.Messages, 8)
 	return prepared, true
 }
@@ -871,7 +949,7 @@ func conversationRequestsMutation(messages []officialtypes.APIMessage) bool {
 		return false
 	}
 	text := stripNegatedMutationPhrases(normalizeIntentText(messages[i].Text()))
-	markers := []string{"hay tao ", "tao di", "tao game", "tao file", "tao app", "tao web", "tao project", "tao thu muc", "lam di", "lam luon", "tien hanh", "lam game", "lam app", "lam web", "viet ", "sua ", "them ", "xoa ", "cap nhat code", "fix it", "fix this", "implement ", "create ", "make ", "write ", "edit ", "modify ", "change ", "add ", "remove ", "delete ", "refactor", "rename ", "move file"}
+	markers := []string{"hay tao ", "tao di", "tao game", "tao file", "tao app", "tao web", "tao project", "tao thu muc", "lam di", "lam luon", "tien hanh", "lam game", "lam app", "lam web", "viet file", "viet code", "viet vao", "viet lai", "viet script", "sua ", "them ", "xoa ", "cap nhat code", "fix it", "fix this", "implement ", "create ", "make ", "write ", "edit ", "modify ", "change ", "add ", "remove ", "delete ", "refactor", "rename ", "move file"}
 	for _, marker := range markers {
 		if strings.Contains(text, marker) {
 			return true

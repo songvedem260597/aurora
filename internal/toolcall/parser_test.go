@@ -351,6 +351,26 @@ func TestBuildInstructionsIncludesNameAndDescription(t *testing.T) {
 			t.Errorf("missing %q in:\n%s", expect, got)
 		}
 	}
+	if !strings.Contains(got, "Tools are optional") {
+		t.Fatalf("auto tool choice must explicitly allow a plain answer: %s", got)
+	}
+}
+
+func TestBuildInstructionsBoundsVerboseClientMetadata(t *testing.T) {
+	longDescription := strings.Repeat("very verbose description ", 100)
+	tools := []official.Tool{{Type: "function", Function: official.ToolFunction{
+		Name:        "bash",
+		Description: longDescription,
+		Parameters: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string","description":"` +
+			longDescription + `"}},"required":["command"]}`),
+	}}}
+	got := BuildInstructions(tools, nil)
+	if len([]rune(got)) >= 1500 {
+		t.Fatalf("bounded prompt is still too large: %d runes", len([]rune(got)))
+	}
+	if !strings.Contains(got, "…") {
+		t.Fatal("verbose descriptions should be visibly truncated")
+	}
 }
 
 func TestBuildInstructionsForcedChoice(t *testing.T) {

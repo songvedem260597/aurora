@@ -96,6 +96,15 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 
 	// 工具调用模式判定
 	toolsEnabled := requestToolCallingEnabled(&original_request, h.cfg)
+	// Standard tool_choice=none requests never need the emulation prompt. For a
+	// conservative single-turn informational request with tool_choice=auto, the
+	// host tools are equally irrelevant. Removing them here avoids the buffered
+	// classifier and a large synthetic prompt while preserving all user/system
+	// messages and generation options.
+	directNoTool := prepareDirectNoToolRequest(&original_request)
+	if directNoTool {
+		toolsEnabled = false
+	}
 	originalMessageCount := len(original_request.Messages)
 	originalToolCount := len(original_request.Tools)
 	// OpenCode includes its host tools on every turn, including a plain request
@@ -808,11 +817,11 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			writeToolProgressSSE(c, *reqModel, "↻ Lượt trước chưa chạy tool thật — đang ép chọn lại tool/lệnh...")
 		}
 		translated := baseTranslated
-		if len(tools) > 0 && !informationalAttachment {
-			translated.AddMessage("user", "\n\n[HOST AGENT SEMANTIC CONTRACT: Infer the latest user's intent from the meaning of the FULL conversation, not from keywords. Start your response with EXACTLY ONE hidden intent marker. Use <agent_intent>action</agent_intent> when the user wants any real host/workspace action (including implicit follow-ups that refer to an artifact created earlier); immediately follow it with the appropriate <tool_call> block(s) and no planning prose. Use <agent_intent>answer</agent_intent> when the user only wants information, explanation, opinion, clarification, or analysis/description of content already attached in the latest turn; follow it with the complete answer in normal text and do not call tools. Client-generated helper text saying an attachment/file was read or loaded is preprocessing context, not a user request for host execution. Never reply with a future promise such as 'I will...' instead of acting or answering now.]")
+		if len(tools) > 0 && !informationalAttachment && !requireToolCall {
+			translated.AddMessage("user", "\n\n[HOST INTENT: Start with exactly one marker. Use <agent_intent>action</agent_intent> plus immediate <tool_call> blocks when real host/workspace action is needed. Use <agent_intent>answer</agent_intent> plus the complete plain-text answer when no host action is needed. An already attached file is input, not a request to run a host tool. Never promise future action.]")
 		}
 		if requireToolCall {
-			retrySuffix := "\n\n[HOST TOOL PROTOCOL OVERRIDE: Do NOT look for a native ChatGPT bash/shell/file tool. The surrounding OpenCode host intercepts <tool_call> blocks from your TEXT response and executes them on the user's REAL machine. Your job is only to emit the protocol block; the host performs the command and sends the real result back on the next turn. Therefore never say the tool is unavailable, never guess command output or paths, and never describe what you plan to inspect. Respond with ONLY one or more <tool_call> blocks, starting immediately with '<tool_call>'.]"
+			retrySuffix := "\n\n[HOST TOOL: The client executes listed <tool_call> blocks on the real host and returns their output next turn. Reply now with only valid tool-call blocks. Do not use a native sandbox, guess output, or write prose.]"
 			contentTask := conversationRequiresContentWork(originalRequest.Messages) || semanticFollowupContent
 			contentMutationRequired := contentTask && !hasContentMutationToolCallSinceLastUser(originalRequest.Messages)
 			verificationRequired := contentTask && !contentMutationRequired && !hasVerificationAfterContentMutation(originalRequest.Messages)
