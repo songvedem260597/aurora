@@ -17,7 +17,11 @@ var testAccount = accounts.NewAccount("test", accounts.TypeNoAuth, "")
 
 func testConvert(t *testing.T, req official.APIRequest) chatgpt_types.ChatGPTRequest {
 	t.Helper()
-	return ConvertAPIRequest(req, testAccount, "", nil)
+	out, err := ConvertAPIRequest(req, testAccount, "", nil)
+	if err != nil {
+		t.Fatalf("convert request: %v", err)
+	}
+	return out
 }
 
 func TestConvertAPIRequestNoToolsNoInjection(t *testing.T) {
@@ -226,7 +230,8 @@ type inlineUploadRequest struct {
 }
 
 type inlineUploadClient struct {
-	requests []inlineUploadRequest
+	requests   []inlineUploadRequest
+	failStatus int
 }
 
 func (c *inlineUploadClient) Request(method httpclient.HttpMethod, url string, headers httpclient.AuroraHeaders, _ []*http.Cookie, body io.Reader) (*http.Response, error) {
@@ -239,6 +244,9 @@ func (c *inlineUploadClient) Request(method httpclient.HttpMethod, url string, h
 		}
 	}
 	c.requests = append(c.requests, inlineUploadRequest{method: method, url: url, headers: headers, body: data})
+	if c.failStatus != 0 {
+		return testHTTPResponse(c.failStatus, `{"detail":"upload unavailable"}`), nil
+	}
 
 	switch len(c.requests) {
 	case 1:
@@ -280,7 +288,10 @@ func TestBuildMessagePartsUploadsOpenCodeFileDataURL(t *testing.T) {
 
 	client := &inlineUploadClient{}
 	account := accounts.NewAccount("test", accounts.TypeFree, "access-token")
-	parts, metadata := buildMessageParts(message, client, account, "")
+	parts, metadata, err := buildMessageParts(message, client, account, "")
+	if err != nil {
+		t.Fatalf("build message parts: %v", err)
+	}
 
 	if len(client.requests) != 3 {
 		t.Fatalf("upload request count = %d, want create + put + confirm; Files() = %#v", len(client.requests), message.Files())
@@ -344,7 +355,10 @@ func TestBuildMessagePartsUploadsOpenCodeImageURLWireFormat(t *testing.T) {
 
 	client := &inlineUploadClient{}
 	account := accounts.NewAccount("test", accounts.TypeFree, "access-token")
-	parts, metadata := buildMessageParts(message, client, account, "")
+	parts, metadata, err := buildMessageParts(message, client, account, "")
+	if err != nil {
+		t.Fatalf("build message parts: %v", err)
+	}
 
 	if len(client.requests) != 3 {
 		t.Fatalf("upload request count = %d, want create + put + confirm", len(client.requests))
@@ -363,5 +377,27 @@ func TestBuildMessagePartsUploadsOpenCodeImageURLWireFormat(t *testing.T) {
 	attachments, ok := metadata["attachments"].([]interface{})
 	if !ok || len(attachments) != 1 {
 		t.Fatalf("attachments = %#v, want one uploaded attachment", metadata["attachments"])
+	}
+}
+
+func TestConvertAPIRequestReturnsInlineAttachmentUploadFailure(t *testing.T) {
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	message := official.APIMessage{
+		Role: "user",
+		Content: official.MessageContent{Parts: []official.MessageContentPart{
+			{Type: "image_url", ImageURL: &official.ImageURLDetail{URL: dataURL}},
+			{Type: "text", Text: "describe this image"},
+		}},
+	}
+	req := official.APIRequest{Model: "gpt-5-6-thinking", Messages: []official.APIMessage{message}}
+	account := accounts.NewAccount("test", accounts.TypeFree, "access-token")
+	client := &inlineUploadClient{failStatus: http.StatusTooManyRequests}
+
+	_, err := ConvertAPIRequest(req, account, "", client)
+	if err == nil {
+		t.Fatal("inline attachment upload failure must abort conversion instead of silently sending a text-only request")
+	}
+	if !strings.Contains(err.Error(), "upload attachment") || !strings.Contains(err.Error(), "HTTP 429") {
+		t.Fatalf("unexpected upload error: %v", err)
 	}
 }

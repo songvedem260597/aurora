@@ -37,6 +37,15 @@ func respondError(c *gin.Context, status int, err error) {
 	}})
 }
 
+func respondRequestConversionError(c *gin.Context, err error) {
+	c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
+		"message": err.Error(),
+		"type":    "attachment_upload_error",
+		"param":   "messages",
+		"code":    "attachment_upload_failed",
+	}})
+}
+
 // resolveAccount 从请求 Authorization header 解析账号
 // 替代旧的 secretFromAuthorization + accessTokenFromRefreshToken
 // 返回 (account, http_status, error)

@@ -97,7 +97,11 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 	}
 
 	// Convert the chat request to a ChatGPT request
-	translated_request := chatgptrequestconverter.ConvertAPIRequest(original_request, account, proxyUrl, client)
+	translated_request, err := chatgptrequestconverter.ConvertAPIRequest(original_request, account, proxyUrl, client)
+	if err != nil {
+		respondRequestConversionError(c, err)
+		return
+	}
 
 	// 按 conversationID 复用 ChatClientState
 	var clientState *chatgpt.ChatClientState
@@ -318,7 +322,11 @@ func (h *ChatHandler) Responses(c *gin.Context) {
 		client = setupClientWithProxy(proxyUrl)
 	}
 
-	translated_request := chatgptrequestconverter.ConvertAPIRequest(original_request, account, proxyUrl, client)
+	translated_request, err := chatgptrequestconverter.ConvertAPIRequest(original_request, account, proxyUrl, client)
+	if err != nil {
+		respondRequestConversionError(c, err)
+		return
+	}
 
 	// 按 conversationID 复用 ChatClientState，保持 DeviceID/SessionID 一致
 	var clientState *chatgpt.ChatClientState
@@ -672,7 +680,11 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		maxRefusalRetries = 3
 	}
 
-	baseTranslated := chatgptrequestconverter.ConvertAPIRequest(*originalRequest, account, *proxyUrl, *client)
+	baseTranslated, err := chatgptrequestconverter.ConvertAPIRequest(*originalRequest, account, *proxyUrl, *client)
+	if err != nil {
+		respondRequestConversionError(c, err)
+		return
+	}
 	if baseTranslated.ConversationID != "" {
 		*clientState = h.sessions.Get(baseTranslated.ConversationID)
 	}

@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.Account, proxy string, client httpclient.AuroraHttpClient) chatgpt_types.ChatGPTRequest {
+func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.Account, proxy string, client httpclient.AuroraHttpClient) (chatgpt_types.ChatGPTRequest, error) {
 	chatgpt_request := chatgpt_types.NewChatGPTRequest()
 
 	// Model is passed directly to upstream; default to "auto" if not provided
@@ -126,10 +126,13 @@ func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.
 		if role == "assistant" && apiMessage.HasToolCalls() {
 			text := apiMessage.Text()
 			text += toolcall.SerializeForHistory(apiMessage.ToolCalls)
-			parts, metadata := buildMessageParts(official_types.APIMessage{
+			parts, metadata, err := buildMessageParts(official_types.APIMessage{
 				Role:    role,
 				Content: official_types.MessageContent{TextValue: text},
 			}, client, account, proxy)
+			if err != nil {
+				return chatgpt_request, err
+			}
 			if len(metadata) > 0 {
 				chatgpt_request.AddMultimodalMessage(role, parts, metadata)
 			} else {
@@ -137,7 +140,10 @@ func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.
 			}
 			continue
 		}
-		parts, metadata := buildMessageParts(apiMessage, client, account, proxy)
+		parts, metadata, err := buildMessageParts(apiMessage, client, account, proxy)
+		if err != nil {
+			return chatgpt_request, err
+		}
 		if len(metadata) > 0 {
 			chatgpt_request.AddMultimodalMessage(role, parts, metadata)
 			continue
@@ -153,7 +159,7 @@ func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.
 		}
 	}
 
-	return chatgpt_request
+	return chatgpt_request, nil
 }
 
 func ConvertTTSAPIRequest(input string) chatgpt_types.ChatGPTRequest {
@@ -163,11 +169,14 @@ func ConvertTTSAPIRequest(input string) chatgpt_types.ChatGPTRequest {
 	return chatgpt_request
 }
 
-func buildMessageParts(message official_types.APIMessage, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) ([]interface{}, map[string]interface{}) {
+func buildMessageParts(message official_types.APIMessage, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) ([]interface{}, map[string]interface{}, error) {
 	text := message.Text()
-	files := enrichFiles(message.Files(), client, account, proxy)
+	files, err := enrichFiles(message.Files(), client, account, proxy)
+	if err != nil {
+		return nil, nil, err
+	}
 	if len(files) == 0 {
-		return []interface{}{text}, nil
+		return []interface{}{text}, nil, nil
 	}
 
 	parts := make([]interface{}, 0, len(files)+1)
@@ -227,10 +236,10 @@ func buildMessageParts(message official_types.APIMessage, client httpclient.Auro
 		"selected_github_repos":        []interface{}{},
 		"selected_all_github_repos":    false,
 		"serialization_metadata":       map[string]interface{}{"custom_symbol_offsets": []interface{}{}},
-	}
+	}, nil
 }
 
-func enrichFiles(files []official_types.FileAttachment, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) []official_types.FileAttachment {
+func enrichFiles(files []official_types.FileAttachment, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) ([]official_types.FileAttachment, error) {
 	enriched := make([]official_types.FileAttachment, 0, len(files))
 	seen := make(map[string]bool)
 	for _, file := range files {
@@ -241,13 +250,15 @@ func enrichFiles(files []official_types.FileAttachment, client httpclient.Aurora
 
 		// 处理 image_url 和 OpenCode type=file+url 的 inline 数据
 		// (data: URL 或 http URL)。
-		if file.Source != "" && client != nil && account != nil {
-			if uploaded, ok := uploadInlineImage(file, client, account, proxy); ok {
-				file = uploaded
-			} else {
-				// 免费账号或上传失败:丢弃图片,只保留文本
-				continue
+		if file.Source != "" {
+			if client == nil || account == nil {
+				return nil, fmt.Errorf("attachment %q cannot be uploaded without an authenticated upload client", fileName(file))
 			}
+			uploaded, err := uploadInlineImage(file, client, account, proxy)
+			if err != nil {
+				return nil, err
+			}
+			file = uploaded
 		}
 		if uploaded, ok := backendchatgpt.LookupUploadedFile(fileID(file)); ok {
 			if file.ID == "" {
@@ -275,11 +286,11 @@ func enrichFiles(files []official_types.FileAttachment, client httpclient.Aurora
 		seen[fileID(file)] = true
 		enriched = append(enriched, file)
 	}
-	return enriched
+	return enriched, nil
 }
 
 // uploadInlineImage 将 data: URL 或 http URL 图片上传到 ChatGPT 文件服务。
-func uploadInlineImage(file official_types.FileAttachment, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) (official_types.FileAttachment, bool) {
+func uploadInlineImage(file official_types.FileAttachment, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) (official_types.FileAttachment, error) {
 	src := file.Source
 	var data []byte
 	filename := strings.TrimSpace(fileName(file))
@@ -289,7 +300,7 @@ func uploadInlineImage(file official_types.FileAttachment, client httpclient.Aur
 		// data:image/png;base64,iVBOR...
 		commaIdx := strings.Index(src, ",")
 		if commaIdx < 0 {
-			return file, false
+			return file, fmt.Errorf("attachment %q has an invalid data URL", filename)
 		}
 		meta := src[:commaIdx]
 		b64data := src[commaIdx+1:]
@@ -305,7 +316,7 @@ func uploadInlineImage(file official_types.FileAttachment, client httpclient.Aur
 			// 尝试 raw base64
 			data, err = base64.RawStdEncoding.DecodeString(b64data)
 			if err != nil {
-				return file, false
+				return file, fmt.Errorf("attachment %q has invalid base64 data: %w", filename, err)
 			}
 		}
 		if filename == "" {
@@ -318,15 +329,15 @@ func uploadInlineImage(file official_types.FileAttachment, client httpclient.Aur
 		// 下载远程图片
 		resp, err := http.Get(src)
 		if err != nil {
-			return file, false
+			return file, fmt.Errorf("download attachment %q: %w", filename, err)
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != 200 {
-			return file, false
+			return file, fmt.Errorf("download attachment %q returned HTTP %d", filename, resp.StatusCode)
 		}
 		data, err = io.ReadAll(resp.Body)
 		if err != nil {
-			return file, false
+			return file, fmt.Errorf("read attachment %q: %w", filename, err)
 		}
 		if contentType == "" {
 			contentType = resp.Header.Get("Content-Type")
@@ -335,11 +346,11 @@ func uploadInlineImage(file official_types.FileAttachment, client httpclient.Aur
 			filename = guessFilenameFromURL(src)
 		}
 	} else {
-		return file, false
+		return file, fmt.Errorf("attachment %q uses an unsupported source", filename)
 	}
 
 	if len(data) == 0 {
-		return file, false
+		return file, fmt.Errorf("attachment %q is empty", filename)
 	}
 	if contentType == "" {
 		contentType = http.DetectContentType(data)
@@ -348,10 +359,9 @@ func uploadInlineImage(file official_types.FileAttachment, client httpclient.Aur
 		filename = "image.png"
 	}
 
-	uploaded, _, err := backendchatgpt.UploadFile(client, account, proxy, filename, contentType, data)
+	uploaded, status, err := backendchatgpt.UploadFile(client, account, proxy, filename, contentType, data)
 	if err != nil {
-		// 免费 token 无法上传文件,回退:把 data URL 原样传递
-		return file, false
+		return file, fmt.Errorf("upload attachment %q failed with HTTP %d: %w", filename, status, err)
 	}
 
 	return official_types.FileAttachment{
@@ -366,7 +376,7 @@ func uploadInlineImage(file official_types.FileAttachment, client httpclient.Aur
 		Width:         uploaded.Width,
 		Height:        uploaded.Height,
 		LibraryFileID: uploaded.LibraryFileID,
-	}, true
+	}, nil
 }
 
 func guessFilenameFromURL(url string) string {
