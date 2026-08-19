@@ -414,6 +414,42 @@ func TestInformationalAttachmentUsesSmallRecentWindow(t *testing.T) {
 	}
 }
 
+func TestPrepareDirectInformationalAttachmentPreservesStreamingImage(t *testing.T) {
+	stream := true
+	parallel := true
+	request := &officialtypes.APIRequest{
+		Stream:            stream,
+		ParallelToolCalls: &parallel,
+		ToolChoice:        &officialtypes.ToolChoice{Type: "auto"},
+		Tools:             []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: []officialtypes.APIMessage{
+			officialtypes.NewTextMessage("system", "system"),
+			officialtypes.NewTextMessage("user", "older context"),
+			officialtypes.NewTextMessage("assistant", "older answer"),
+			{
+				Role: "user",
+				Content: officialtypes.MessageContent{Parts: []officialtypes.MessageContentPart{
+					{Type: "text", Text: "mô tả ảnh này"},
+					{Type: "image_url", ImageURL: &officialtypes.ImageURLDetail{URL: "data:image/png;base64,iVBORw0"}},
+				}},
+			},
+		},
+	}
+
+	if !prepareDirectInformationalAttachment(request) {
+		t.Fatal("plain image description was not routed to direct streaming")
+	}
+	if !request.Stream {
+		t.Fatal("direct image answer lost the client's stream request")
+	}
+	if len(request.Tools) != 0 || request.ToolChoice != nil || request.ParallelToolCalls != nil {
+		t.Fatalf("host tool protocol was not removed: %#v", request)
+	}
+	if len(request.Messages[len(request.Messages)-1].Files()) != 1 {
+		t.Fatal("direct streaming request dropped the attached image")
+	}
+}
+
 func TestAttachmentMutationKeepsToolProtocolInUpstreamRequest(t *testing.T) {
 	original := &officialtypes.APIRequest{
 		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},

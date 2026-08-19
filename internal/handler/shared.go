@@ -439,6 +439,17 @@ func latestUserAttachmentAllowsTextAnswer(messages []officialtypes.APIMessage) b
 		!conversationRequiresContentWork(messages)
 }
 
+func prepareDirectInformationalAttachment(request *officialtypes.APIRequest) bool {
+	if request == nil || !latestUserAttachmentAllowsTextAnswer(request.Messages) {
+		return false
+	}
+	request.Tools = nil
+	request.ToolChoice = nil
+	request.ParallelToolCalls = nil
+	request.Messages = compactUpstreamHistory(request.Messages, 8)
+	return true
+}
+
 // toolUpstreamRequest removes the emulated host-tool protocol for a turn that
 // only asks the model to inspect an already-attached image. OpenCode includes
 // its tool definitions on ordinary answer turns too; forwarding the large tool
