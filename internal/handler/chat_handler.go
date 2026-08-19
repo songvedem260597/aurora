@@ -101,7 +101,7 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 	// buffered tool-protocol classifier: route it through the normal streaming
 	// path so the first visible text reaches OpenCode as soon as upstream emits
 	// it. Coding/edit requests that happen to include an image keep tool mode.
-	if toolsEnabled && prepareDirectInformationalAttachment(&original_request) {
+	if prepareDirectInformationalAttachment(&original_request) {
 		toolsEnabled = false
 	}
 	toolStreamRequested := original_request.Stream
