@@ -324,6 +324,13 @@ func shouldRequireToolCall(request *officialtypes.APIRequest, text string) bool 
 	if actionTask && !hasToolCallSinceLastUser(request.Messages) {
 		return true
 	}
+	// An inline attachment is already available to the upstream model. For an
+	// informational attachment turn, response wording such as a sandbox/path
+	// refusal must not be reinterpreted as a request to run a host tool. The
+	// semantic retry can ask the model to answer from the attachment instead.
+	if latestUserAttachmentAllowsTextAnswer(request.Messages) {
+		return false
+	}
 	return looksLikeSandboxRefusal(text)
 }
 
@@ -374,14 +381,18 @@ func agentIntentRequiresTool(intent string, messages []officialtypes.APIMessage)
 	// host execution, even though the attachment is already available to the
 	// model. Treat attachment-only inspection as an answer task unless the
 	// actual turn independently carries a host action/mutation/content signal.
-	if latestUserHasAttachment(messages) &&
-		!userExplicitlyRequestsTool(messages) &&
-		!conversationRequestsAction(messages) &&
-		!conversationRequestsMutation(messages) &&
-		!conversationRequiresContentWork(messages) {
+	if latestUserAttachmentAllowsTextAnswer(messages) {
 		return false
 	}
 	return true
+}
+
+func latestUserAttachmentAllowsTextAnswer(messages []officialtypes.APIMessage) bool {
+	return latestUserHasAttachment(messages) &&
+		!userExplicitlyRequestsTool(messages) &&
+		!conversationRequestsAction(messages) &&
+		!conversationRequestsMutation(messages) &&
+		!conversationRequiresContentWork(messages)
 }
 
 func latestUserHasAttachment(messages []officialtypes.APIMessage) bool {

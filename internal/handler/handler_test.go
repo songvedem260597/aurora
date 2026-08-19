@@ -273,13 +273,10 @@ func TestConversationRequestsActionDoesNotForceExplanation(t *testing.T) {
 }
 
 func TestAttachedImageQuestionDoesNotForceHostToolFromSemanticActionMarker(t *testing.T) {
-	// This is the OpenAI-compatible wire shape produced by OpenCode after its
-	// local Read helper turns --file into an inline image_url.
-	body := `{"role":"user","content":[` +
-		`{"type":"text","text":"Called the Read tool with the following input"},` +
-		`{"type":"text","text":"Image read successfully"},` +
-		`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,/9j/4AAQ"}},` +
-		`{"type":"text","text":"Ảnh này là ảnh gì? Trả lời ngắn gọn."}]}`
+	// This is the exact OpenCode session wire shape for --file attachments:
+	// synthetic Read helper text + a type=file data URL + the real user prompt.
+	body := `{"role":"user","content":[{"type":"text","text":"Called the Read tool with the following input"},{"type":"text","text":"Image read successfully"},{"type":"file","mime":"image/jpeg","filename":"photo.jpg","url":"data:image/jpeg;base64,/9j/4AAQ"},{"type":"text","text":"Ảnh này là ảnh gì? Trả lời ngắn gọn."}]}`
+	body = strings.ReplaceAll(body, "\\\"", "\"")
 	var latest officialtypes.APIMessage
 	if err := json.Unmarshal([]byte(body), &latest); err != nil {
 		t.Fatalf("decode OpenCode image message: %v", err)
@@ -300,8 +297,27 @@ func TestAttachedImageQuestionDoesNotForceHostToolFromSemanticActionMarker(t *te
 	if !latestUserHasAttachment(messages) {
 		t.Fatal("OpenCode image_url turn should be recognized as containing an attachment")
 	}
+	if userExplicitlyRequestsTool(messages) {
+		t.Fatal("synthetic OpenCode attachment helper text must not count as an explicit tool request")
+	}
+	if conversationRequestsAction(messages) {
+		t.Fatal("an informational image question must not count as a host action request")
+	}
+	if conversationRequestsMutation(messages) {
+		t.Fatal("an informational image question must not count as a workspace mutation")
+	}
+	if conversationRequiresContentWork(messages) {
+		t.Fatal("an informational image question must not count as coding/content work")
+	}
 	if agentIntentRequiresTool(agentIntentAction, messages) {
 		t.Fatal("an already-attached image question must not inherit a mandatory host tool requirement")
+	}
+	req := &officialtypes.APIRequest{
+		Tools:    []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: messages,
+	}
+	if shouldRequireToolCall(req, "Đây là ảnh một chiếc váy trên mannequin.") {
+		t.Fatal("an attached image question with a normal answer must not trigger the pre-semantic tool gate")
 	}
 }
 
@@ -316,6 +332,24 @@ func TestAttachedImageMutationStillRequiresHostTool(t *testing.T) {
 
 	if !agentIntentRequiresTool(agentIntentAction, messages) {
 		t.Fatal("an attachment must not bypass tools when the user actually requests a workspace mutation")
+	}
+}
+
+func TestAttachedImageQuestionDoesNotEscalateSandboxStyleTextToHostTool(t *testing.T) {
+	req := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: []officialtypes.APIMessage{{
+			Role: "user",
+			Content: officialtypes.MessageContent{Parts: []officialtypes.MessageContentPart{
+				{Type: "text", Text: "Image read successfully"},
+				{Type: "image_url", ImageURL: &officialtypes.ImageURLDetail{URL: "data:image/jpeg;base64,/9j/4AAQ"}},
+				{Type: "text", Text: "Ảnh này là ảnh gì?"},
+			}},
+		}},
+	}
+
+	if shouldRequireToolCall(req, "I cannot inspect /mnt/data from this environment.") {
+		t.Fatal("an informational attachment turn must not convert response text into a mandatory host tool call")
 	}
 }
 
