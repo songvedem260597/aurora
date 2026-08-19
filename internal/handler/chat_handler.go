@@ -687,6 +687,22 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	var lastConversationID string
 	var lastSentinel []map[string]interface{}
 	requireToolCall := shouldRequireToolCall(originalRequest, "")
+	toolChoiceDebug := "<unset>"
+	if originalRequest.ToolChoice != nil {
+		toolChoiceDebug = originalRequest.ToolChoice.Type
+		if forced := originalRequest.ToolChoice.ForcedFunctionName(); forced != "" {
+			toolChoiceDebug += ":" + forced
+		}
+	}
+	fmt.Fprintf(os.Stderr, "[tool-gate] initial require=%t tool_choice=%s attachment=%t explicit=%t action=%t mutation=%t content=%t\n",
+		requireToolCall,
+		toolChoiceDebug,
+		latestUserHasAttachment(originalRequest.Messages),
+		userExplicitlyRequestsTool(originalRequest.Messages),
+		conversationRequestsAction(originalRequest.Messages),
+		conversationRequestsMutation(originalRequest.Messages),
+		conversationRequiresContentWork(originalRequest.Messages),
+	)
 	semanticRetry := false
 	semanticFollowupContent := false
 	completionRetry := false
