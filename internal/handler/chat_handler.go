@@ -855,7 +855,17 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			visionRetry = true
 			completionRetry = false
 			if attempt < maxRefusalRetries-1 {
-				fmt.Fprintf(os.Stderr, "[chatgpt] model failed to answer from an already-uploaded attachment (attempt %d/%d), retrying vision answer\n", attempt+1, maxRefusalRetries)
+				fmt.Fprintf(
+					os.Stderr,
+					"[chatgpt] model failed to answer from an already-uploaded attachment (attempt %d/%d, empty=%t refusal=%t intent=%q raw_bytes=%d clean_bytes=%d), retrying vision answer\n",
+					attempt+1,
+					maxRefusalRetries,
+					strings.TrimSpace(cleanText) == "",
+					looksLikeAttachmentAccessRefusal(cleanText),
+					agentIntent,
+					len(result.Text),
+					len(cleanText),
+				)
 				continue
 			}
 		}
