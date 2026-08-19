@@ -477,14 +477,44 @@ func TestToolUpstreamRequestCompactsLongHistory(t *testing.T) {
 	}
 }
 
-func TestForceRequiredUpstreamToolChoiceAlignsAutoPrompt(t *testing.T) {
+func TestForceRequiredUpstreamToolChoiceForcesSoleFunction(t *testing.T) {
 	request := &officialtypes.APIRequest{
 		Tools:      []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
 		ToolChoice: &officialtypes.ToolChoice{Type: "auto"},
 	}
 	forceRequiredUpstreamToolChoice(request, true)
+	if got := request.ToolChoice.ForcedFunctionName(); got != "bash" {
+		t.Fatalf("forced function = %q, want sole function bash", got)
+	}
+}
+
+func TestForceRequiredUpstreamToolChoiceAlignsMultiToolAutoPrompt(t *testing.T) {
+	request := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{
+			{Type: "function", Function: officialtypes.ToolFunction{Name: "read"}},
+			{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}},
+		},
+		ToolChoice: &officialtypes.ToolChoice{Type: "auto"},
+		Messages:   []officialtypes.APIMessage{officialtypes.NewTextMessage("user", "Inspect the host.")},
+	}
+	forceRequiredUpstreamToolChoice(request, true)
 	if request.ToolChoice == nil || request.ToolChoice.Type != "required" {
 		t.Fatalf("upstream tool choice = %#v, want required", request.ToolChoice)
+	}
+}
+
+func TestForceRequiredUpstreamToolChoiceUsesExplicitAdvertisedName(t *testing.T) {
+	request := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{
+			{Type: "function", Function: officialtypes.ToolFunction{Name: "read"}},
+			{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}},
+		},
+		ToolChoice: &officialtypes.ToolChoice{Type: "auto"},
+		Messages:   []officialtypes.APIMessage{officialtypes.NewTextMessage("user", "Use the bash tool to run pwd.")},
+	}
+	forceRequiredUpstreamToolChoice(request, true)
+	if got := request.ToolChoice.ForcedFunctionName(); got != "bash" {
+		t.Fatalf("forced function = %q, want explicitly requested bash", got)
 	}
 }
 

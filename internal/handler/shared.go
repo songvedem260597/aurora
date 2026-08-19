@@ -563,7 +563,25 @@ func forceRequiredUpstreamToolChoice(request *officialtypes.APIRequest, required
 	if request == nil || !required || len(request.Tools) == 0 {
 		return
 	}
-	if request.ToolChoice != nil && (request.ToolChoice.IsForcedNone() || request.ToolChoice.RequiresCall()) {
+	if request.ToolChoice != nil && (request.ToolChoice.IsForcedNone() || request.ToolChoice.ForcedFunctionName() != "") {
+		return
+	}
+	// With a single function, OpenAI's "required" choice is semantically
+	// identical to forcing that function, but the latter gives the text-only
+	// upstream a concrete name and is markedly more reliable. The same applies
+	// when the user explicitly names one of several advertised tools.
+	forcedName := explicitlyRequestedToolName(request.Messages, request.Tools)
+	if forcedName == "" && len(request.Tools) == 1 && request.Tools[0].Type == "function" {
+		forcedName = request.Tools[0].Function.Name
+	}
+	if forcedName != "" {
+		request.ToolChoice = &officialtypes.ToolChoice{
+			Type:     "function",
+			Function: &officialtypes.ToolChoiceFunction{Name: forcedName},
+		}
+		return
+	}
+	if request.ToolChoice != nil && request.ToolChoice.RequiresCall() {
 		return
 	}
 	// The semantic gate has already established that this turn must execute a
@@ -571,6 +589,33 @@ func forceRequiredUpstreamToolChoice(request *officialtypes.APIRequest, required
 	// agreement with that decision; leaving the upstream choice as "auto"
 	// invites the model to guess an answer in prose before the retry override.
 	request.ToolChoice = &officialtypes.ToolChoice{Type: "required"}
+}
+
+func explicitlyRequestedToolName(messages []officialtypes.APIMessage, tools []officialtypes.Tool) string {
+	userIndex := lastUserIndex(messages)
+	if userIndex < 0 {
+		return ""
+	}
+	text := " " + normalizeIntentText(messages[userIndex].Text()) + " "
+	for _, tool := range tools {
+		if tool.Type != "function" || strings.TrimSpace(tool.Function.Name) == "" {
+			continue
+		}
+		name := normalizeIntentText(tool.Function.Name)
+		patterns := []string{
+			"use " + name, "using " + name, "call " + name,
+			"dung " + name, "goi " + name,
+			name + " tool", "tool " + name,
+		}
+		for _, pattern := range patterns {
+			if strings.Contains(text, " "+pattern+" ") ||
+				strings.Contains(text, " "+pattern+".") ||
+				strings.Contains(text, " "+pattern+",") {
+				return tool.Function.Name
+			}
+		}
+	}
+	return ""
 }
 
 // compactUpstreamHistory bounds the transcript replayed to ChatGPT Web. The
