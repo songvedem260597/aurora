@@ -67,8 +67,8 @@ func Init() (*App, error) {
 		accs = append(accs, acct)
 	}
 
-	// 2. refresh_tokens.txt — 带 refresh_token，可续期
-	for _, t := range accounts.LoadTokensFromFile("refresh_tokens.txt") {
+	// 2. refresh_tokens.txt / REFRESH_TOKEN(S) — 带 refresh_token，可续期
+	for _, t := range loadRefreshTokens() {
 		// 立即交换一次获取 access_token 才能解析 chatgpt_account_id
 		// 先用 refresh_token 本身做去重 key,避免重复交换
 		key := "refresh:" + t.Token
@@ -255,34 +255,83 @@ func sessionTokenFilePath() string {
 	return "session_tokens.txt"
 }
 
-func loadAccessTokens() []accounts.RawToken {
-	tokens := accounts.LoadTokensFromFile("access_tokens.txt")
-	envToken := strings.TrimSpace(os.Getenv("ACCESS_TOKEN"))
-	if envToken == "" {
-		return tokens
+func parseEnvTokenList(value string) []accounts.RawToken {
+	entries := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == ','
+	})
+	out := make([]accounts.RawToken, 0, len(entries))
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" || strings.HasPrefix(entry, "#") {
+			continue
+		}
+		parts := strings.SplitN(entry, ":", 2)
+		token := strings.TrimSpace(parts[0])
+		if token == "" {
+			continue
+		}
+		raw := accounts.RawToken{Token: token}
+		if len(parts) > 1 {
+			raw.TeamID = strings.TrimSpace(parts[1])
+		}
+		out = append(out, raw)
 	}
-	envTeamID := strings.TrimSpace(os.Getenv("ACCESS_TEAM_ID"))
-	for _, t := range tokens {
-		if t.Token == envToken {
-			return tokens
+	return out
+}
+
+func mergeRawTokens(groups ...[]accounts.RawToken) []accounts.RawToken {
+	merged := make([]accounts.RawToken, 0)
+	index := make(map[string]int)
+	for _, group := range groups {
+		for _, raw := range group {
+			raw.Token = strings.TrimSpace(raw.Token)
+			raw.TeamID = strings.TrimSpace(raw.TeamID)
+			if raw.Token == "" {
+				continue
+			}
+			if i, ok := index[raw.Token]; ok {
+				if merged[i].TeamID == "" && raw.TeamID != "" {
+					merged[i].TeamID = raw.TeamID
+				}
+				continue
+			}
+			index[raw.Token] = len(merged)
+			merged = append(merged, raw)
 		}
 	}
-	return append(tokens, accounts.RawToken{Token: envToken, TeamID: envTeamID})
+	return merged
+}
+
+func singleEnvToken(tokenEnv, teamEnv string) []accounts.RawToken {
+	token := strings.TrimSpace(os.Getenv(tokenEnv))
+	if token == "" {
+		return nil
+	}
+	return []accounts.RawToken{{Token: token, TeamID: strings.TrimSpace(os.Getenv(teamEnv))}}
+}
+
+func loadAccessTokens() []accounts.RawToken {
+	return mergeRawTokens(
+		accounts.LoadTokensFromFile("access_tokens.txt"),
+		parseEnvTokenList(os.Getenv("ACCESS_TOKENS")),
+		singleEnvToken("ACCESS_TOKEN", "ACCESS_TEAM_ID"),
+	)
+}
+
+func loadRefreshTokens() []accounts.RawToken {
+	return mergeRawTokens(
+		accounts.LoadTokensFromFile("refresh_tokens.txt"),
+		parseEnvTokenList(os.Getenv("REFRESH_TOKENS")),
+		singleEnvToken("REFRESH_TOKEN", "REFRESH_TEAM_ID"),
+	)
 }
 
 func loadSessionTokens() []accounts.RawToken {
-	tokens := accounts.LoadTokensFromFile(sessionTokenFilePath())
-	envToken := strings.TrimSpace(os.Getenv("SESSION_TOKEN"))
-	if envToken == "" {
-		return tokens
-	}
-	envTeamID := strings.TrimSpace(os.Getenv("SESSION_TEAM_ID"))
-	for _, t := range tokens {
-		if t.Token == envToken {
-			return tokens
-		}
-	}
-	return append(tokens, accounts.RawToken{Token: envToken, TeamID: envTeamID})
+	return mergeRawTokens(
+		accounts.LoadTokensFromFile(sessionTokenFilePath()),
+		parseEnvTokenList(os.Getenv("SESSION_TOKENS")),
+		singleEnvToken("SESSION_TOKEN", "SESSION_TEAM_ID"),
+	)
 }
 
 // persistRotatedSessionToken 将轮换得到的新 session token 写回 session_tokens.txt，

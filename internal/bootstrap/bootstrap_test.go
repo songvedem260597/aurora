@@ -118,6 +118,7 @@ func TestRotatedTokenSurvivesReload(t *testing.T) {
 
 func TestLoadAccessTokensFromEnvironment(t *testing.T) {
 	chdirTemp(t)
+	t.Setenv("ACCESS_TOKENS", "")
 	t.Setenv("ACCESS_TOKEN", "env-access-token")
 	t.Setenv("ACCESS_TEAM_ID", "team-env")
 
@@ -130,8 +131,49 @@ func TestLoadAccessTokensFromEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadAccessTokensFromMultiEnvironment(t *testing.T) {
+	chdirTemp(t)
+	t.Setenv("ACCESS_TOKENS", "token-a:team-a\ntoken-b, token-c:team-c\ntoken-a")
+	t.Setenv("ACCESS_TOKEN", "token-d")
+	t.Setenv("ACCESS_TEAM_ID", "team-d")
+
+	loaded := loadAccessTokens()
+	if len(loaded) != 4 {
+		t.Fatalf("expected 4 deduplicated tokens, got %d: %#v", len(loaded), loaded)
+	}
+	want := []accounts.RawToken{
+		{Token: "token-a", TeamID: "team-a"},
+		{Token: "token-b"},
+		{Token: "token-c", TeamID: "team-c"},
+		{Token: "token-d", TeamID: "team-d"},
+	}
+	for i := range want {
+		if loaded[i] != want[i] {
+			t.Fatalf("token[%d] = %#v, want %#v", i, loaded[i], want[i])
+		}
+	}
+}
+
+func TestLoadRefreshTokensFromMultiEnvironment(t *testing.T) {
+	chdirTemp(t)
+	t.Setenv("REFRESH_TOKENS", "refresh-a:team-a,refresh-b")
+	t.Setenv("REFRESH_TOKEN", "refresh-c")
+	t.Setenv("REFRESH_TEAM_ID", "team-c")
+
+	loaded := loadRefreshTokens()
+	if len(loaded) != 3 {
+		t.Fatalf("expected 3 refresh tokens, got %d: %#v", len(loaded), loaded)
+	}
+	if loaded[0].Token != "refresh-a" || loaded[0].TeamID != "team-a" ||
+		loaded[1].Token != "refresh-b" ||
+		loaded[2].Token != "refresh-c" || loaded[2].TeamID != "team-c" {
+		t.Fatalf("unexpected refresh tokens: %#v", loaded)
+	}
+}
+
 func TestLoadSessionTokensFromEnvironment(t *testing.T) {
 	t.Setenv("SESSION_TOKEN_FILE", filepath.Join(t.TempDir(), "missing-session-tokens.txt"))
+	t.Setenv("SESSION_TOKENS", "")
 	t.Setenv("SESSION_TOKEN", "env-session-token")
 	t.Setenv("SESSION_TEAM_ID", "team-env")
 
@@ -141,6 +183,23 @@ func TestLoadSessionTokensFromEnvironment(t *testing.T) {
 	}
 	if loaded[0].Token != "env-session-token" || loaded[0].TeamID != "team-env" {
 		t.Fatalf("unexpected env token: %#v", loaded[0])
+	}
+}
+
+func TestLoadSessionTokensFromMultiEnvironment(t *testing.T) {
+	t.Setenv("SESSION_TOKEN_FILE", filepath.Join(t.TempDir(), "missing-session-tokens.txt"))
+	t.Setenv("SESSION_TOKENS", "session-a:team-a\nsession-b,session-a")
+	t.Setenv("SESSION_TOKEN", "session-c")
+	t.Setenv("SESSION_TEAM_ID", "team-c")
+
+	loaded := loadSessionTokens()
+	if len(loaded) != 3 {
+		t.Fatalf("expected 3 session tokens, got %d: %#v", len(loaded), loaded)
+	}
+	if loaded[0].Token != "session-a" || loaded[0].TeamID != "team-a" ||
+		loaded[1].Token != "session-b" ||
+		loaded[2].Token != "session-c" || loaded[2].TeamID != "team-c" {
+		t.Fatalf("unexpected session tokens: %#v", loaded)
 	}
 }
 
