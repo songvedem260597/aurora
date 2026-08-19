@@ -367,7 +367,7 @@ func TestResolveAccountWithGlobalKey(t *testing.T) {
 	}
 }
 
-func TestWriteToolCallingSSEMatchesOpenAIAgentStreamingShape(t *testing.T) {
+func TestWriteToolCallingSSEMatches9RouterStreamingShape(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	writer := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(writer)
@@ -383,50 +383,34 @@ func TestWriteToolCallingSSEMatchesOpenAIAgentStreamingShape(t *testing.T) {
 
 	writeToolCallingSSE(c, "", calls, "gpt-test", "conv-test", false)
 	lines := sseDataLines(writer.Body.String())
-	if len(lines) != 5 {
-		t.Fatalf("data line count = %d, want role + name + args + stop + DONE; output: %s", len(lines), writer.Body.String())
+	if len(lines) != 4 {
+		t.Fatalf("data line count = %d, want role + tool_calls + stop + DONE; output: %s", len(lines), writer.Body.String())
 	}
 
-	var nameChunk map[string]interface{}
-	if err := json.Unmarshal([]byte(lines[1]), &nameChunk); err != nil {
-		t.Fatalf("invalid name chunk: %v", err)
+	var toolChunk map[string]interface{}
+	if err := json.Unmarshal([]byte(lines[1]), &toolChunk); err != nil {
+		t.Fatalf("invalid tool chunk: %v", err)
 	}
-	nameDelta := nameChunk["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
-	nameCall := nameDelta["tool_calls"].([]interface{})[0].(map[string]interface{})
-	if nameCall["id"] != "call_test" || nameCall["type"] != "function" {
-		t.Fatalf("unexpected tool identity chunk: %#v", nameCall)
+	toolDelta := toolChunk["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
+	toolCall := toolDelta["tool_calls"].([]interface{})[0].(map[string]interface{})
+	if toolCall["id"] != "call_test" || toolCall["type"] != "function" {
+		t.Fatalf("unexpected tool identity chunk: %#v", toolCall)
 	}
-	nameFn := nameCall["function"].(map[string]interface{})
-	if nameFn["name"] != "bash" {
-		t.Fatalf("tool name = %#v, want bash", nameFn["name"])
-	}
-	if _, ok := nameFn["arguments"]; ok {
-		t.Fatalf("name chunk must not contain arguments: %#v", nameFn)
-	}
-
-	var argsChunk map[string]interface{}
-	if err := json.Unmarshal([]byte(lines[2]), &argsChunk); err != nil {
-		t.Fatalf("invalid arguments chunk: %v", err)
-	}
-	argsCall := argsChunk["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})["tool_calls"].([]interface{})[0].(map[string]interface{})
-	argsFn := argsCall["function"].(map[string]interface{})
-	if argsFn["arguments"] != `{"command":"pwd"}` {
-		t.Fatalf("arguments = %#v", argsFn["arguments"])
-	}
-	if _, ok := argsFn["name"]; ok {
-		t.Fatalf("arguments chunk must not repeat name: %#v", argsFn)
+	fn := toolCall["function"].(map[string]interface{})
+	if fn["name"] != "bash" || fn["arguments"] != `{"command":"pwd"}` {
+		t.Fatalf("unexpected function chunk: %#v", fn)
 	}
 
 	var stopChunk map[string]interface{}
-	if err := json.Unmarshal([]byte(lines[3]), &stopChunk); err != nil {
+	if err := json.Unmarshal([]byte(lines[2]), &stopChunk); err != nil {
 		t.Fatalf("invalid stop chunk: %v", err)
 	}
 	finish := stopChunk["choices"].([]interface{})[0].(map[string]interface{})["finish_reason"]
 	if finish != "tool_calls" {
 		t.Fatalf("finish_reason = %#v, want tool_calls", finish)
 	}
-	if lines[4] != "[DONE]" {
-		t.Fatalf("last data line = %q, want [DONE]", lines[4])
+	if lines[3] != "[DONE]" {
+		t.Fatalf("last data line = %q, want [DONE]", lines[3])
 	}
 }
 

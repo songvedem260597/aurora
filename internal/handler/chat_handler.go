@@ -852,16 +852,23 @@ func writeToolCallingSSE(c *gin.Context, text string, calls []officialtypes.Tool
 	}
 
 	if len(calls) > 0 {
-		// Match the streaming shape used by normal OpenAI-compatible agent
-		// providers (including 9Router): emit the tool identity/name first,
-		// then append function.arguments in following delta.tool_calls chunks.
-		// This lets OpenCode create the visible tool row before all arguments
-		// have arrived, instead of receiving one monolithic tool-call chunk.
-		for _, deltas := range toolcall.StreamToToolCallDeltas(calls) {
-			chunk := officialtypes.NewToolCallChunk(model, deltas...)
-			c.Writer.WriteString("data: " + chunk.String() + "\n\n")
-			c.Writer.Flush()
+		// Match the raw 9Router OpenAI-compatible stream observed locally:
+		// one delta.tool_calls chunk carries id/index/type/name/arguments,
+		// followed by finish_reason=tool_calls.
+		deltas := make([]officialtypes.ToolCallDelta, 0, len(calls))
+		for _, call := range calls {
+			deltas = append(deltas, officialtypes.ToolCallDelta{
+				Index: call.Index,
+				ID:    call.ID,
+				Type:  call.Type,
+				Function: officialtypes.ToolCallFuncDelta{
+					Name:      call.Function.Name,
+					Arguments: call.Function.Arguments,
+				},
+			})
 		}
+		chunk := officialtypes.NewToolCallChunk(model, deltas...)
+		c.Writer.WriteString("data: " + chunk.String() + "\n\n")
 		stop := officialtypes.NewToolCallStopChunk(model, conversationID)
 		c.Writer.WriteString("data: " + stop.String() + "\n\n")
 	} else {
