@@ -79,6 +79,105 @@ func TestToolCallingEnabledFromConfig(t *testing.T) {
 	}
 }
 
+func TestShouldRequireToolCallForDeferredWorkspaceAction(t *testing.T) {
+	req := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: []officialtypes.APIMessage{{
+			Role:    "user",
+			Content: officialtypes.MessageContent{TextValue: "ok làm đi"},
+		}},
+	}
+	text := "Tao bắt đầu bằng việc xem cấu trúc repo hiện tại để không đè nhầm code, sau đó sẽ sửa."
+	if !shouldRequireToolCall(req, text) {
+		t.Fatal("deferred workspace action should require an actual tool call")
+	}
+}
+
+func TestShouldRequireToolCallForExplicitToolRequest(t *testing.T) {
+	req := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: []officialtypes.APIMessage{{
+			Role:    "user",
+			Content: officialtypes.MessageContent{TextValue: "You must use the shell tool to print the current working directory."},
+		}},
+	}
+	if !shouldRequireToolCall(req, "/") {
+		t.Fatal("an explicit shell request must not degrade into plain text")
+	}
+}
+
+func TestShouldRequireToolCallRespectsAutoPlainAnswer(t *testing.T) {
+	req := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: []officialtypes.APIMessage{{
+			Role:    "user",
+			Content: officialtypes.MessageContent{TextValue: "Explain what a closure is."},
+		}},
+	}
+	if shouldRequireToolCall(req, "A closure is a function together with its captured lexical environment.") {
+		t.Fatal("tool_choice=auto must still allow an ordinary text answer")
+	}
+}
+
+func TestShouldRequireToolCallRespectsForcedChoice(t *testing.T) {
+	req := &officialtypes.APIRequest{
+		Tools:      []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		ToolChoice: &officialtypes.ToolChoice{Type: "any"},
+	}
+	if !shouldRequireToolCall(req, "plain text") {
+		t.Fatal("tool_choice=any must require a tool call")
+	}
+
+	req.ToolChoice = &officialtypes.ToolChoice{Type: "none"}
+	if shouldRequireToolCall(req, "I will inspect the repo") {
+		t.Fatal("tool_choice=none must disable forced tool retries")
+	}
+}
+
+func TestConversationRequestsActionDirectInstruction(t *testing.T) {
+	messages := []officialtypes.APIMessage{{
+		Role:    "user",
+		Content: officialtypes.MessageContent{TextValue: "sửa code rồi test đi"},
+	}}
+	if !conversationRequestsAction(messages) {
+		t.Fatal("direct implementation request should require execution")
+	}
+}
+
+func TestConversationRequestsActionFromConfirmation(t *testing.T) {
+	messages := []officialtypes.APIMessage{
+		{Role: "assistant", Content: officialtypes.MessageContent{TextValue: "Tao sẽ sửa handler rồi chạy test."}},
+		{Role: "user", Content: officialtypes.MessageContent{TextValue: "ok"}},
+	}
+	if !conversationRequestsAction(messages) {
+		t.Fatal("confirmation after promised action should inherit execution intent")
+	}
+}
+
+func TestConversationRequestsActionDoesNotForceExplanation(t *testing.T) {
+	messages := []officialtypes.APIMessage{{
+		Role:    "user",
+		Content: officialtypes.MessageContent{TextValue: "giải thích closure là gì"},
+	}}
+	if conversationRequestsAction(messages) {
+		t.Fatal("pure explanation should not require a workspace action")
+	}
+}
+
+func TestConversationRequestsActionAfterOpenAIJSONRoundTrip(t *testing.T) {
+	body := `{"model":"gpt-5-6-thinking","messages":[{"role":"assistant","content":"Tao sẽ sửa handler rồi chạy test để xác nhận."},{"role":"user","content":"ok"}],"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]}`
+	var req officialtypes.APIRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("unmarshal request: %v", err)
+	}
+	if !conversationRequestsAction(req.Messages) {
+		t.Fatal("OpenAI JSON round-trip should preserve inherited execution intent")
+	}
+	if !shouldRequireToolCall(&req, "") {
+		t.Fatal("parsed OpenAI request should require a tool call")
+	}
+}
+
 // ─── Test: original_requestHasFiles ──────────────────────────────
 
 func TestOriginalRequestHasFiles(t *testing.T) {

@@ -278,7 +278,161 @@ func looksLikeSandboxRefusal(text string) bool {
 	return false
 }
 
-// appendToolDebugLog 把每次工具解析的输入文本和解析结果写入日志文件
+// shouldRequireToolCall decides whether a plain-text response is actually a
+// failed tool-call attempt. OpenCode normally sends tool_choice=auto, so merely
+// having tools available is not enough: ordinary questions must still be able
+// to finish in text. We only force a retry when the client explicitly requires
+// a tool, the user explicitly asks for one, or the model says it is about to
+// inspect/run/edit the workspace without emitting a tool call.
+func shouldRequireToolCall(request *officialtypes.APIRequest, text string) bool {
+	if request == nil || len(request.Tools) == 0 {
+		return false
+	}
+	if request.ToolChoice != nil {
+		if request.ToolChoice.IsForcedNone() {
+			return false
+		}
+		if request.ToolChoice.Type == "any" || request.ToolChoice.ForcedFunctionName() != "" {
+			return true
+		}
+	}
+	if userExplicitlyRequestsTool(request.Messages) || conversationRequestsAction(request.Messages) {
+		return true
+	}
+	return looksLikeSandboxRefusal(text) || looksLikeDeferredToolAction(text)
+}
+
+func userExplicitlyRequestsTool(messages []officialtypes.APIMessage) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != "user" {
+			continue
+		}
+		t := strings.ToLower(messages[i].Text())
+		negative := []string{"do not use a tool", "don't use a tool", "do not use tools", "không dùng tool", "đừng dùng tool"}
+		for _, marker := range negative {
+			if strings.Contains(t, marker) {
+				return false
+			}
+		}
+		markers := []string{
+			"must use the shell", "must use shell", "must use bash", "must use a tool",
+			"use the shell tool", "use shell", "use bash", "use a tool", "call the tool",
+			"run a command", "execute a command", "phải dùng shell", "phải dùng bash",
+			"phải dùng tool", "dùng shell", "dùng bash", "dùng tool", "gọi tool", "chạy lệnh",
+		}
+		for _, marker := range markers {
+			if strings.Contains(t, marker) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func conversationRequestsAction(messages []officialtypes.APIMessage) bool {
+	lastUser := ""
+	lastUserIndex := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			lastUser = strings.ToLower(strings.TrimSpace(messages[i].Text()))
+			lastUserIndex = i
+			break
+		}
+	}
+	if lastUser == "" {
+		return false
+	}
+
+	// Direct action requests that should be executed rather than acknowledged.
+	actionMarkers := []string{
+		"làm đi", "làm luôn", "tiến hành", "sửa đi", "sửa luôn", "thêm vào", "thêm vô",
+		"xóa đi", "xoá đi", "tạo đi", "chạy đi", "test đi", "build đi", "deploy đi",
+		"commit đi", "push đi", "kiểm tra đi", "check đi", "đọc file", "mở file", "xem repo",
+		"kiểm tra repo", "xem cấu trúc", "sửa code", "thêm code", "update code", "cập nhật code",
+		"fix it", "fix this", "do it", "go ahead", "implement it", "implement this", "add it",
+		"remove it", "delete it", "create it", "run it", "test it", "build it", "deploy it",
+		"commit it", "push it", "check the repo", "inspect the repo", "read the file", "open the file",
+		"modify the code", "change the code", "update the code", "refactor", "rename", "move the file",
+	}
+	for _, marker := range actionMarkers {
+		if strings.Contains(lastUser, marker) {
+			return true
+		}
+	}
+
+	// Short confirmations inherit the actionable intent from the previous
+	// assistant turn. This covers the common OpenCode flow: assistant says
+	// "I'll inspect/fix/test it" and the user replies only "ok làm đi" / "ok".
+	confirmations := map[string]bool{
+		"ok": true, "okay": true, "ok làm đi": true, "làm đi": true, "ừ": true, "uh": true,
+		"được": true, "được làm đi": true, "tiếp đi": true, "continue": true, "go ahead": true,
+	}
+	if confirmations[lastUser] && lastUserIndex > 0 {
+		for i := lastUserIndex - 1; i >= 0; i-- {
+			if messages[i].Role != "assistant" {
+				continue
+			}
+			if looksLikeDeferredToolAction(messages[i].Text()) || assistantPromisesAction(messages[i].Text()) {
+				return true
+			}
+			break
+		}
+	}
+	return false
+}
+
+func assistantPromisesAction(text string) bool {
+	if text == "" {
+		return false
+	}
+	t := strings.ToLower(text)
+	markers := []string{
+		"i'll fix", "i will fix", "i'll implement", "i will implement", "i'll add", "i will add",
+		"i'll remove", "i will remove", "i'll create", "i will create", "i'll run", "i will run",
+		"i'll test", "i will test", "i'll build", "i will build", "i'll deploy", "i will deploy",
+		"i'll commit", "i will commit", "i'll push", "i will push", "i'll inspect", "i will inspect",
+		"tao sẽ sửa", "tao sẽ làm", "tao sẽ thêm", "tao sẽ xóa", "tao sẽ xoá", "tao sẽ tạo",
+		"tao sẽ chạy", "tao sẽ test", "tao sẽ build", "tao sẽ deploy", "tao sẽ commit", "tao sẽ push",
+		"tôi sẽ sửa", "tôi sẽ làm", "tôi sẽ thêm", "tôi sẽ tạo", "tôi sẽ chạy", "mình sẽ sửa",
+		"mình sẽ làm", "mình sẽ thêm", "mình sẽ tạo", "mình sẽ chạy",
+	}
+	for _, marker := range markers {
+		if strings.Contains(t, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikeDeferredToolAction(text string) bool {
+	if text == "" {
+		return false
+	}
+	t := strings.ToLower(strings.TrimSpace(text))
+	markers := []string{
+		"i'll inspect", "i will inspect", "let me inspect", "i'm going to inspect",
+		"i'll check", "i will check", "let me check", "i'm going to check",
+		"i'll read", "i will read", "let me read", "i'll open", "i will open", "let me open",
+		"i'll run", "i will run", "let me run", "i'll execute", "i will execute",
+		"i'll create", "i will create", "i'll edit", "i will edit", "i'll modify", "i will modify",
+		"i'll test", "i will test", "i'll build", "i will build", "i'll start by", "i will start by",
+		"tao sẽ xem", "tao sẽ kiểm tra", "tao sẽ đọc", "tao sẽ mở", "tao sẽ chạy",
+		"tao sẽ tạo", "tao sẽ sửa", "tao sẽ test", "tao sẽ build", "tao bắt đầu bằng",
+		"tôi sẽ xem", "tôi sẽ kiểm tra", "tôi sẽ đọc", "tôi sẽ chạy", "tôi sẽ tạo", "tôi sẽ sửa",
+		"mình sẽ xem", "mình sẽ kiểm tra", "mình sẽ đọc", "mình sẽ chạy", "mình sẽ tạo", "mình sẽ sửa",
+		"để tao xem", "để tao kiểm tra", "để tôi xem", "để tôi kiểm tra", "để mình xem", "để mình kiểm tra",
+		"sẽ xem cấu trúc", "sẽ kiểm tra repo", "sẽ đọc file", "sẽ chạy lệnh",
+	}
+	for _, marker := range markers {
+		if strings.Contains(t, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// appendToolDebugLog writes each tool-parse attempt and parsed calls to the configured debug log.
 func appendToolDebugLog(path string, attempt int, text string, calls []officialtypes.ToolCall) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
