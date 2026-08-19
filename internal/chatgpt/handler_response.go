@@ -133,6 +133,7 @@ type HandlerDetailedOptions struct {
 	ArtifactDelivery string
 	ProxyURL         string
 	Tools            []official_types.Tool
+	DebugSSE         bool
 }
 
 // HandlerDetailedWithOptions 处理对话响应流（最完整版）。
@@ -283,7 +284,7 @@ readLoop:
 				continue
 			}
 			streamEvent, ok := parseConversationEvent(line, &patchState, model)
-			if os.Getenv("DEBUG_SSE") != "" {
+			if os.Getenv("DEBUG_SSE") != "" || options.DebugSSE {
 				debugText := streamEvent.text
 				debugSrc := "chunk"
 				if streamEvent.response.Message.ID != "" {

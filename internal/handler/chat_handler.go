@@ -803,6 +803,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			ClientState:      *clientState,
 			ArtifactDelivery: originalRequest.ArtifactDelivery,
 			ProxyURL:         *proxyUrl,
+			DebugSSE:         informationalAttachment,
 		})
 		response.Body.Close()
 
