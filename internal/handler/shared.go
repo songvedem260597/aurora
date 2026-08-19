@@ -300,7 +300,15 @@ func shouldRequireToolCall(request *officialtypes.APIRequest, text string) bool 
 	}
 	actionTask := userExplicitlyRequestsTool(request.Messages) || conversationRequestsAction(request.Messages)
 	mutationTask := conversationRequestsMutation(request.Messages)
-	if mutationTask && !hasMutationToolCallSinceLastUser(request.Messages) {
+	contentTask := conversationRequiresContentWork(request.Messages)
+	if contentTask {
+		if !hasContentMutationToolCallSinceLastUser(request.Messages) {
+			return true
+		}
+		if !hasVerificationAfterContentMutation(request.Messages) {
+			return true
+		}
+	} else if mutationTask && !hasMutationToolCallSinceLastUser(request.Messages) {
 		return true
 	}
 	if actionTask && !hasToolCallSinceLastUser(request.Messages) {
@@ -337,6 +345,115 @@ func hasToolCallSinceLastUser(messages []officialtypes.APIMessage) bool {
 	start := lastUserIndex(messages)
 	for i := start + 1; i < len(messages); i++ {
 		if messages[i].Role == "assistant" && len(messages[i].ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func conversationRequiresContentWork(messages []officialtypes.APIMessage) bool {
+	i := lastUserIndex(messages)
+	if i < 0 {
+		return false
+	}
+	text := normalizeIntentText(messages[i].Text())
+	markers := []string{"game", "app", "web", "website", "html", "css", "javascript", "typescript", "code", "project", "repo", "component", "script"}
+	for _, marker := range markers {
+		if containsIntentWord(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsIntentWord(text, word string) bool {
+	padded := " " + strings.TrimSpace(text) + " "
+	return strings.Contains(padded, " "+word+" ") ||
+		strings.Contains(padded, " "+word+".") ||
+		strings.Contains(padded, " "+word+",") ||
+		strings.Contains(padded, " "+word+":") ||
+		strings.Contains(padded, " "+word+"/") ||
+		strings.Contains(padded, "/"+word+" ")
+}
+
+func hasContentMutationToolCallSinceLastUser(messages []officialtypes.APIMessage) bool {
+	start := lastUserIndex(messages)
+	for i := start + 1; i < len(messages); i++ {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+		for _, call := range messages[i].ToolCalls {
+			if toolCallWritesContent(call) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasVerificationAfterContentMutation(messages []officialtypes.APIMessage) bool {
+	start := lastUserIndex(messages)
+	lastMutation := -1
+	for i := start + 1; i < len(messages); i++ {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+		for _, call := range messages[i].ToolCalls {
+			if toolCallWritesContent(call) {
+				lastMutation = i
+			}
+		}
+	}
+	if lastMutation < 0 {
+		return false
+	}
+	for i := lastMutation + 1; i < len(messages); i++ {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+		for _, call := range messages[i].ToolCalls {
+			if toolCallVerifiesWork(call) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func toolCallWritesContent(call officialtypes.ToolCallRef) bool {
+	name := normalizeIntentText(call.Function.Name)
+	for _, marker := range []string{"write", "edit", "apply_patch", "patch", "write_file", "create_file", "str_replace", "replace"} {
+		if name == marker || strings.Contains(name, marker) {
+			return true
+		}
+	}
+	if name != "bash" && name != "shell" && name != "terminal" && name != "exec" && name != "run_command" {
+		return false
+	}
+	args := strings.ToLower(call.Function.Arguments)
+	markers := []string{"set-content", "add-content", "out-file", "writealltext", "writeallbytes", "cat >", "cat >>", "tee ", " > ", ">>"}
+	for _, marker := range markers {
+		if strings.Contains(args, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func toolCallVerifiesWork(call officialtypes.ToolCallRef) bool {
+	name := normalizeIntentText(call.Function.Name)
+	for _, marker := range []string{"read", "view", "open", "test", "check", "lint", "diagnostic"} {
+		if name == marker || strings.Contains(name, marker) {
+			return true
+		}
+	}
+	if name != "bash" && name != "shell" && name != "terminal" && name != "exec" && name != "run_command" {
+		return false
+	}
+	args := strings.ToLower(call.Function.Arguments)
+	markers := []string{"test-path", "get-content", "get-item", "node --check", "npm test", "npm run", "pnpm test", "yarn test", "pytest", "go test", "cargo test", "dotnet test", "curl ", "invoke-webrequest", "start-process", "python ", "node "}
+	for _, marker := range markers {
+		if strings.Contains(args, marker) {
 			return true
 		}
 	}

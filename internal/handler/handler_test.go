@@ -209,24 +209,80 @@ func TestMutationTaskRejectsReadOnlyToolResult(t *testing.T) {
 	}
 }
 
-func TestMutationTaskAllowsFinalAfterWrite(t *testing.T) {
+func TestGenericMutationTaskAllowsFinalAfterWrite(t *testing.T) {
 	call := officialtypes.ToolCallRef{ID: "call_write", Type: "function"}
 	call.Function.Name = "write"
-	call.Function.Arguments = `{"filePath":"C:\\Users\\uchih\\Desktop\\pvz\\index.html","content":"<html></html>"}`
+	call.Function.Arguments = `{"filePath":"C:\\Users\\uchih\\Desktop\\settings.txt","content":"enabled=true"}`
 	req := &officialtypes.APIRequest{
 		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "write"}}},
 		Messages: []officialtypes.APIMessage{
-			{Role: "user", Content: officialtypes.MessageContent{TextValue: "hãy tạo game pvz trên desktop bằng html đi"}},
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "sửa cài đặt đi"}},
 			{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{call}},
 			{Role: "tool", ToolCallID: "call_write", Content: officialtypes.MessageContent{TextValue: "written"}},
 		},
 	}
-	if shouldRequireToolCall(req, "Đã tạo file và sẽ báo kết quả.") {
-		t.Fatal("a real write tool result should satisfy the mutation gate")
+	if shouldRequireToolCall(req, "Đã cập nhật cài đặt.") {
+		t.Fatal("a real write tool result should satisfy a generic mutation task")
 	}
 }
 
 // ─── Test: original_requestHasFiles ──────────────────────────────
+
+func TestContentTaskRejectsDirectoryOnlySetup(t *testing.T) {
+	call := officialtypes.ToolCallRef{ID: "call_mkdir", Type: "function"}
+	call.Function.Name = "bash"
+	call.Function.Arguments = `{"command":"New-Item -ItemType Directory -Path C:\\Users\\uchih\\Desktop\\VoxelCraft"}`
+	req := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: []officialtypes.APIMessage{
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "tạo game minecraft trên desktop đi"}},
+			{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{call}},
+			{Role: "tool", ToolCallID: "call_mkdir", Content: officialtypes.MessageContent{TextValue: "C:\\Users\\uchih\\Desktop\\VoxelCraft"}},
+		},
+	}
+	if !shouldRequireToolCall(req, "Mình sẽ làm game voxel 3D chạy trực tiếp trên desktop.") {
+		t.Fatal("directory-only setup must not satisfy a coding/game task")
+	}
+}
+
+func TestContentTaskRequiresVerificationAfterWrite(t *testing.T) {
+	writeCall := officialtypes.ToolCallRef{ID: "call_write", Type: "function"}
+	writeCall.Function.Name = "write"
+	writeCall.Function.Arguments = `{"filePath":"C:\\Users\\uchih\\Desktop\\VoxelCraft\\index.html","content":"<html></html>"}`
+	req := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "write"}}},
+		Messages: []officialtypes.APIMessage{
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "tạo game minecraft trên desktop đi"}},
+			{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{writeCall}},
+			{Role: "tool", ToolCallID: "call_write", Content: officialtypes.MessageContent{TextValue: "written"}},
+		},
+	}
+	if !shouldRequireToolCall(req, "Đã tạo game xong.") {
+		t.Fatal("coding task must verify after writing content")
+	}
+}
+
+func TestContentTaskAllowsFinalAfterWriteAndVerification(t *testing.T) {
+	writeCall := officialtypes.ToolCallRef{ID: "call_write", Type: "function"}
+	writeCall.Function.Name = "write"
+	writeCall.Function.Arguments = `{"filePath":"C:\\Users\\uchih\\Desktop\\VoxelCraft\\index.html","content":"<html></html>"}`
+	verifyCall := officialtypes.ToolCallRef{ID: "call_verify", Type: "function"}
+	verifyCall.Function.Name = "bash"
+	verifyCall.Function.Arguments = `{"command":"Get-Content C:\\Users\\uchih\\Desktop\\VoxelCraft\\index.html | Select-Object -First 1"}`
+	req := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: []officialtypes.APIMessage{
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "tạo game minecraft trên desktop đi"}},
+			{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{writeCall}},
+			{Role: "tool", ToolCallID: "call_write", Content: officialtypes.MessageContent{TextValue: "written"}},
+			{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{verifyCall}},
+			{Role: "tool", ToolCallID: "call_verify", Content: officialtypes.MessageContent{TextValue: "<html></html>"}},
+		},
+	}
+	if shouldRequireToolCall(req, "Đã tạo và kiểm tra game.") {
+		t.Fatal("coding task with content mutation and later verification may finish")
+	}
+}
 
 func TestBashMutationDetection(t *testing.T) {
 	redirect := officialtypes.ToolCallRef{}

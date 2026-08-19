@@ -717,15 +717,22 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		translated := baseTranslated
 		if attempt > 0 || requireToolCall {
 			retrySuffix := "\n\n[HOST TOOL PROTOCOL OVERRIDE: Do NOT look for a native ChatGPT bash/shell/file tool. The surrounding OpenCode host intercepts <tool_call> blocks from your TEXT response and executes them on the user's REAL machine. Your job is only to emit the protocol block; the host performs the command and sends the real result back on the next turn. Therefore never say the tool is unavailable, never guess command output or paths, and never describe what you plan to inspect. Respond with ONLY one or more <tool_call> blocks, starting immediately with '<tool_call>'.]"
-			mutationRequired := conversationRequestsMutation(originalRequest.Messages) && !hasMutationToolCallSinceLastUser(originalRequest.Messages)
-			if !mutationRequired {
+			contentTask := conversationRequiresContentWork(originalRequest.Messages)
+			contentMutationRequired := contentTask && !hasContentMutationToolCallSinceLastUser(originalRequest.Messages)
+			verificationRequired := contentTask && !contentMutationRequired && !hasVerificationAfterContentMutation(originalRequest.Messages)
+			mutationRequired := !contentTask && conversationRequestsMutation(originalRequest.Messages) && !hasMutationToolCallSinceLastUser(originalRequest.Messages)
+			if !contentMutationRequired && !verificationRequired && !mutationRequired {
 				if forced := originalRequest.ToolChoice.ForcedFunctionName(); forced == "" {
 					if example := toolcall.FirstToolCallExample(tools, toolcall.ExtractWorkingDir(originalRequest.Messages)); example != "" {
 						retrySuffix += "\nThe host accepts this exact style; emit a call like this now:\n" + example
 					}
 				}
 			}
-			if mutationRequired {
+			if contentMutationRequired {
+				retrySuffix += "\nThis is a coding/content task. Setup-only actions such as mkdir/New-Item Directory, pwd, ls, tree, Test-Path, or empty placeholder files DO NOT count as completing the task. Emit a REAL write/edit/apply_patch tool call (or a shell command that writes actual file contents) for the requested game/app/web/code NOW. Do not stop after creating a directory."
+			} else if verificationRequired {
+				retrySuffix += "\nThe requested code/content has been changed, but the task is NOT complete until it is verified. Run a REAL verification tool now (for example read/check/test/run/open the produced artifact or execute an appropriate test command). Do not claim completion before the host returns the verification result."
+			} else if mutationRequired {
 				retrySuffix += "\nThis is a create/modify task. Read-only inspection (pwd/ls/tree/Test-Path/read) does NOT count as doing the work. Emit a REAL write/edit/create tool call or a mutating shell command for the user's requested target NOW. Do not describe a plan, do not claim a file exists, and do not use a read-only tool as a substitute."
 			}
 			translated.AddMessage("user", retrySuffix)
