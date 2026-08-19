@@ -441,16 +441,46 @@ func conversationRequiresContentWork(messages []officialtypes.APIMessage) bool {
 }
 
 func textLooksLikeContentTask(text string) bool {
+	return contentTaskMatch(text) != ""
+}
+
+func contentTaskMatch(text string) string {
 	markers := []string{"game", "app", "web", "website", "html", "css", "javascript", "typescript", "code", "project", "repo", "component", "script"}
 	for _, marker := range markers {
 		if containsIntentWord(text, marker) {
-			return true
+			return "word:" + marker
 		}
 	}
 	for _, ext := range []string{".html", ".htm", ".css", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".py", ".rs", ".java", ".kt", ".c", ".cpp", ".cc", ".h", ".hpp", ".cs", ".php", ".rb", ".vue", ".svelte"} {
-		if strings.Contains(text, ext) {
+		if containsFileExtension(text, ext) {
+			return "ext:" + ext
+		}
+	}
+	return ""
+}
+
+func containsFileExtension(text, ext string) bool {
+	for searchFrom := 0; searchFrom < len(text); {
+		relative := strings.Index(text[searchFrom:], ext)
+		if relative < 0 {
+			return false
+		}
+		end := searchFrom + relative + len(ext)
+		if end == len(text) {
 			return true
 		}
+		var next rune
+		for _, r := range text[end:] {
+			next = r
+			break
+		}
+		// A real extension ends at a separator, quote, line/column marker,
+		// query delimiter, or another suffix dot. Letters/digits and filename
+		// joiners mean this was only a prefix (for example .c in .clothes).
+		if !unicode.IsLetter(next) && !unicode.IsDigit(next) && next != '_' && next != '-' {
+			return true
+		}
+		searchFrom = end
 	}
 	return false
 }

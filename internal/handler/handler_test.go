@@ -353,6 +353,18 @@ func TestAttachedImageQuestionDoesNotEscalateSandboxStyleTextToHostTool(t *testi
 	}
 }
 
+func TestContentTaskExtensionMatchingRequiresFilenameBoundary(t *testing.T) {
+	imageHelper := `Called the Read tool with the following input: {"filePath":"C:\\Users\\uchih\\Downloads\\_any.clothes_1756508549.jpg"}`
+	if textLooksLikeContentTask(normalizeIntentText(imageHelper)) {
+		t.Fatal(".clothes in an image filename must not be mistaken for the .c source extension")
+	}
+	for _, sourcePath := range []string{"main.c", "src/app.tsx", `C:\\work\\server.go:42`} {
+		if !textLooksLikeContentTask(normalizeIntentText(sourcePath)) {
+			t.Fatalf("real source path %q should still be classified as content work", sourcePath)
+		}
+	}
+}
+
 func TestDeferredResponseRequiresToolForImplicitContentFollowup(t *testing.T) {
 	messages := []officialtypes.APIMessage{
 		{Role: "user", Content: officialtypes.MessageContent{TextValue: "tạo game bắn máy bay pixel bằng html trên desktop"}},
