@@ -314,7 +314,7 @@ func shouldRequireToolCall(request *officialtypes.APIRequest, text string) bool 
 	if actionTask && !hasToolCallSinceLastUser(request.Messages) {
 		return true
 	}
-	return looksLikeSandboxRefusal(text) || looksLikeDeferredToolAction(text)
+	return looksLikeSandboxRefusal(text)
 }
 
 func normalizeIntentText(s string) string {
@@ -356,7 +356,16 @@ func conversationRequiresContentWork(messages []officialtypes.APIMessage) bool {
 	if i < 0 {
 		return false
 	}
-	text := normalizeIntentText(messages[i].Text())
+	if textLooksLikeContentTask(normalizeIntentText(messages[i].Text())) {
+		return true
+	}
+	// For an implicit follow-up, let the model classify intent semantically.
+	// Once it actually emits a tool call, inherit the recent code/game/web
+	// context and apply the stronger write+verify completion gate.
+	return hasToolCallSinceLastUser(messages) && previousContentTask(messages, i)
+}
+
+func textLooksLikeContentTask(text string) bool {
 	markers := []string{"game", "app", "web", "website", "html", "css", "javascript", "typescript", "code", "project", "repo", "component", "script"}
 	for _, marker := range markers {
 		if containsIntentWord(text, marker) {
@@ -365,6 +374,20 @@ func conversationRequiresContentWork(messages []officialtypes.APIMessage) bool {
 	}
 	for _, ext := range []string{".html", ".htm", ".css", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".py", ".rs", ".java", ".kt", ".c", ".cpp", ".cc", ".h", ".hpp", ".cs", ".php", ".rb", ".vue", ".svelte"} {
 		if strings.Contains(text, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+func previousContentTask(messages []officialtypes.APIMessage, before int) bool {
+	seenUsers := 0
+	for i := before - 1; i >= 0 && seenUsers < 4; i-- {
+		if messages[i].Role != "user" {
+			continue
+		}
+		seenUsers++
+		if textLooksLikeContentTask(normalizeIntentText(messages[i].Text())) {
 			return true
 		}
 	}
@@ -381,6 +404,44 @@ func containsIntentWord(text, word string) bool {
 		strings.Contains(padded, "/"+word+" ")
 }
 
+func toolResultLooksFailed(text string) bool {
+	t := normalizeIntentText(text)
+	for _, marker := range []string{"verification failed", "failed to", "file not found", "not found", "status error", "error:", "cannot ", "could not ", "exit code 1", "exit 1"} {
+		if strings.Contains(t, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func toolCallCompletedSuccessfully(messages []officialtypes.APIMessage, assistantIndex int, callID string) bool {
+	for i := assistantIndex + 1; i < len(messages); i++ {
+		if messages[i].Role == "user" {
+			break
+		}
+		if !messages[i].IsToolResult() {
+			continue
+		}
+		if callID != "" && messages[i].ToolCallID != "" && messages[i].ToolCallID != callID {
+			continue
+		}
+		return !toolResultLooksFailed(messages[i].Text())
+	}
+	return false
+}
+
+func latestToolResultFailed(messages []officialtypes.APIMessage) bool {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].IsToolResult() {
+			return toolResultLooksFailed(messages[i].Text())
+		}
+		if messages[i].Role == "user" {
+			return false
+		}
+	}
+	return false
+}
+
 func hasContentMutationToolCallSinceLastUser(messages []officialtypes.APIMessage) bool {
 	start := lastUserIndex(messages)
 	for i := start + 1; i < len(messages); i++ {
@@ -388,7 +449,7 @@ func hasContentMutationToolCallSinceLastUser(messages []officialtypes.APIMessage
 			continue
 		}
 		for _, call := range messages[i].ToolCalls {
-			if toolCallWritesContent(call) {
+			if toolCallWritesContent(call) && toolCallCompletedSuccessfully(messages, i, call.ID) {
 				return true
 			}
 		}
@@ -404,7 +465,7 @@ func hasVerificationAfterContentMutation(messages []officialtypes.APIMessage) bo
 			continue
 		}
 		for _, call := range messages[i].ToolCalls {
-			if toolCallWritesContent(call) {
+			if toolCallWritesContent(call) && toolCallCompletedSuccessfully(messages, i, call.ID) {
 				lastMutation = i
 			}
 		}
@@ -417,7 +478,7 @@ func hasVerificationAfterContentMutation(messages []officialtypes.APIMessage) bo
 			continue
 		}
 		for _, call := range messages[i].ToolCalls {
-			if toolCallVerifiesWork(call) {
+			if toolCallVerifiesWork(call) && toolCallCompletedSuccessfully(messages, i, call.ID) {
 				return true
 			}
 		}
@@ -472,7 +533,7 @@ func hasMutationToolCallSinceLastUser(messages []officialtypes.APIMessage) bool 
 			continue
 		}
 		for _, call := range messages[i].ToolCalls {
-			if toolCallMutatesWorkspace(call) {
+			if toolCallMutatesWorkspace(call) && toolCallCompletedSuccessfully(messages, i, call.ID) {
 				return true
 			}
 		}
@@ -576,7 +637,7 @@ func conversationRequestsAction(messages []officialtypes.APIMessage) bool {
 			if messages[j].Role != "assistant" {
 				continue
 			}
-			if looksLikeDeferredToolAction(messages[j].Text()) || assistantPromisesAction(messages[j].Text()) {
+			if assistantPromisesAction(messages[j].Text()) {
 				return true
 			}
 			break
@@ -600,9 +661,11 @@ func looksLikeDeferredToolAction(text string) bool {
 	if text == "" {
 		return false
 	}
-	t := normalizeIntentText(text)
-	markers := []string{"i'll inspect", "i will inspect", "let me inspect", "i'm going to inspect", "i'll check", "i will check", "let me check", "i'm going to check", "i'll read", "i will read", "let me read", "i'll open", "i will open", "let me open", "i'll run", "i will run", "let me run", "i'll execute", "i will execute", "i'll create", "i will create", "i'll edit", "i will edit", "i'll modify", "i will modify", "i'll test", "i will test", "i'll build", "i will build", "i'll start by", "i will start by", "tao se xem", "tao se kiem tra", "tao se doc", "tao se mo", "tao se chay", "tao se tao", "tao se sua", "tao se test", "tao se build", "tao bat dau bang", "toi se xem", "toi se kiem tra", "toi se doc", "toi se chay", "toi se tao", "toi se sua", "minh se xem", "minh se kiem tra", "minh se doc", "minh se chay", "minh se tao", "minh se sua", "de tao xem", "de tao kiem tra", "de toi xem", "de toi kiem tra", "de minh xem", "de minh kiem tra", "se xem cau truc", "se kiem tra repo", "se doc file", "se chay lenh", "dang tao", "dang sua", "dang lam"}
-	for _, marker := range markers {
+	t := " " + normalizeIntentText(text) + " "
+	// This deliberately does not classify *what* the action is. It only catches
+	// a response that postpones work into the future instead of either executing
+	// a host tool now or answering the user now.
+	for _, marker := range []string{" i will ", " i'll ", " i am going to ", " i'm going to ", " let me ", " minh se ", " toi se ", " tao se ", " de minh ", " de toi ", " de tao "} {
 		if strings.Contains(t, marker) {
 			return true
 		}

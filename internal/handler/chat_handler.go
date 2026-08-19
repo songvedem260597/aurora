@@ -687,6 +687,8 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	var lastConversationID string
 	var lastSentinel []map[string]interface{}
 	requireToolCall := shouldRequireToolCall(originalRequest, "")
+	semanticRetry := false
+	semanticFollowupContent := false
 	if requireToolCall && maxRefusalRetries > 2 {
 		maxRefusalRetries = 2
 	}
@@ -708,20 +710,26 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			writeToolProgressSSE(c, *reqModel, "↻ Lượt trước chưa chạy tool thật — đang ép chọn lại tool/lệnh...")
 		}
 		translated := baseTranslated
-		if attempt > 0 || requireToolCall {
+		if len(tools) > 0 {
+			translated.AddMessage("user", "\n\n[HOST AGENT SEMANTIC CONTRACT: Infer the user's intent from the meaning of the full conversation, not from keywords. If the user is asking you to create, modify, inspect, run, test, deploy, or otherwise act on the REAL host workspace, immediately emit the appropriate <tool_call> block(s); do not announce a future plan. If the user is only asking a question, requesting an explanation/opinion, or clarifying information, answer fully in normal text and do not call tools. Follow-up requests may refer implicitly to an artifact created earlier.]")
+		}
+		if requireToolCall {
 			retrySuffix := "\n\n[HOST TOOL PROTOCOL OVERRIDE: Do NOT look for a native ChatGPT bash/shell/file tool. The surrounding OpenCode host intercepts <tool_call> blocks from your TEXT response and executes them on the user's REAL machine. Your job is only to emit the protocol block; the host performs the command and sends the real result back on the next turn. Therefore never say the tool is unavailable, never guess command output or paths, and never describe what you plan to inspect. Respond with ONLY one or more <tool_call> blocks, starting immediately with '<tool_call>'.]"
-			contentTask := conversationRequiresContentWork(originalRequest.Messages)
+			contentTask := conversationRequiresContentWork(originalRequest.Messages) || semanticFollowupContent
 			contentMutationRequired := contentTask && !hasContentMutationToolCallSinceLastUser(originalRequest.Messages)
 			verificationRequired := contentTask && !contentMutationRequired && !hasVerificationAfterContentMutation(originalRequest.Messages)
 			mutationRequired := !contentTask && conversationRequestsMutation(originalRequest.Messages) && !hasMutationToolCallSinceLastUser(originalRequest.Messages)
-			if !contentMutationRequired && !verificationRequired && !mutationRequired {
+			recoveryRequired := latestToolResultFailed(originalRequest.Messages)
+			if !contentMutationRequired && !verificationRequired && !mutationRequired && !recoveryRequired {
 				if forced := originalRequest.ToolChoice.ForcedFunctionName(); forced == "" {
 					if example := toolcall.FirstToolCallExample(tools, toolcall.ExtractWorkingDir(originalRequest.Messages)); example != "" {
 						retrySuffix += "\nThe host accepts this exact style; emit a call like this now:\n" + example
 					}
 				}
 			}
-			if contentMutationRequired {
+			if recoveryRequired {
+				retrySuffix += "\nThe previous host tool FAILED. Do not retry the same stale patch blindly and do not claim success. First emit a REAL read/inspect tool call for the affected target so the host returns the current contents/state. On the following turn, use that real result to retry the edit safely."
+			} else if contentMutationRequired {
 				retrySuffix += "\nThis is a coding/content task. Setup-only actions such as mkdir/New-Item Directory, pwd, ls, tree, Test-Path, or empty placeholder files DO NOT count as completing the task. Emit a REAL write/edit/apply_patch tool call (or a shell command that writes actual file contents) for the requested game/app/web/code NOW. Do not stop after creating a directory."
 			} else if verificationRequired {
 				retrySuffix += "\nThe requested code/content has been changed, but the task is NOT complete until it is verified. Run a REAL verification tool now (for example read/check/test/run/open the produced artifact or execute an appropriate test command). Do not claim completion before the host returns the verification result."
@@ -729,6 +737,8 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 				retrySuffix += "\nThis is a create/modify task. Read-only inspection (pwd/ls/tree/Test-Path/read) does NOT count as doing the work. Emit a REAL write/edit/create tool call or a mutating shell command for the user's requested target NOW. Do not describe a plan, do not claim a file exists, and do not use a read-only tool as a substitute."
 			}
 			translated.AddMessage("user", retrySuffix)
+		} else if semanticRetry {
+			translated.AddMessage("user", "\n\n[HOST INTENT RETRY: Your previous reply only deferred the next step instead of completing the turn. Re-evaluate the user's intent from the full conversation. If real host/workspace action is required, emit the correct <tool_call> immediately. If the user only wants information/explanation, answer it fully now in text. Do not reply with another promise about what you will do later.]")
 		}
 
 		response, wsConn, _, status, err := conversationClientOrder(client, account, translated, *proxyUrl, false, *clientState, h.accountPool)
@@ -788,12 +798,22 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		if !requireToolCall {
 			requireToolCall = shouldRequireToolCall(originalRequest, result.Text)
 		}
-		if !requireToolCall {
-			break
+		if requireToolCall {
+			if attempt < maxRefusalRetries-1 {
+				fmt.Fprintf(os.Stderr, "[chatgpt] tool call required but none produced (attempt %d/%d), retrying\n", attempt+1, maxRefusalRetries)
+			}
+			continue
 		}
-		if attempt < maxRefusalRetries-1 {
-			fmt.Fprintf(os.Stderr, "[chatgpt] tool call required but none produced (attempt %d/%d), retrying\n", attempt+1, maxRefusalRetries)
+		if looksLikeDeferredToolAction(result.Text) {
+			semanticRetry = true
+			userIndex := lastUserIndex(originalRequest.Messages)
+			semanticFollowupContent = previousContentTask(originalRequest.Messages, userIndex)
+			if attempt < maxRefusalRetries-1 {
+				fmt.Fprintf(os.Stderr, "[chatgpt] deferred response without tool or complete answer (attempt %d/%d), retrying intent classification\n", attempt+1, maxRefusalRetries)
+				continue
+			}
 		}
+		break
 	}
 
 	if len(lastToolCalls) > 0 {
@@ -817,6 +837,14 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			"message": "action required a real tool call, but the model did not execute one",
 			"type":    "tool_call_error",
 			"code":    "missing_tool_call",
+		}})
+		return
+	}
+	if semanticRetry && looksLikeDeferredToolAction(lastText) {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
+			"message": "model deferred the turn instead of either executing a host tool or answering the user",
+			"type":    "agent_intent_error",
+			"code":    "deferred_agent_response",
 		}})
 		return
 	}

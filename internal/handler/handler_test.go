@@ -154,6 +154,64 @@ func TestConversationRequestsActionFromConfirmation(t *testing.T) {
 	}
 }
 
+func TestDeferredResponseDetectionDoesNotDependOnActionVerbList(t *testing.T) {
+	if !looksLikeDeferredToolAction("Mình sẽ đổi gameplay thành cuộn dọc và thêm nhạc nền.") {
+		t.Fatal("generic future commitment should be detected as a deferred response")
+	}
+	if !looksLikeDeferredToolAction("I will adjust the existing artifact to match that request.") {
+		t.Fatal("English future commitment should be detected without classifying the action verb")
+	}
+	if looksLikeDeferredToolAction("Gameplay hiện tại cuộn ngang vì trục X đang điều khiển tốc độ.") {
+		t.Fatal("a direct informational answer must not be treated as deferred work")
+	}
+}
+
+func TestImplicitContentFollowupInheritsGateAfterModelChoosesTool(t *testing.T) {
+	readCall := officialtypes.ToolCallRef{ID: "call_read", Type: "function"}
+	readCall.Function.Name = "read"
+	readCall.Function.Arguments = `{"filePath":"C:\\Users\\uchih\\Desktop\\pixel-plane-game.html"}`
+	messages := []officialtypes.APIMessage{
+		{Role: "user", Content: officialtypes.MessageContent{TextValue: "tạo game bắn máy bay pixel bằng html trên desktop"}},
+		{Role: "assistant", Content: officialtypes.MessageContent{TextValue: "Đã tạo game."}},
+		{Role: "user", Content: officialtypes.MessageContent{TextValue: "bay theo chiều dọc á với có nhạc nữa"}},
+		{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{readCall}},
+		{Role: "tool", ToolCallID: "call_read", Name: "read", Content: officialtypes.MessageContent{TextValue: "<html>existing game</html>"}},
+	}
+	if !conversationRequiresContentWork(messages) {
+		t.Fatal("once the model semantically chooses a tool for an implicit follow-up, prior content-task context must be inherited")
+	}
+	req := &officialtypes.APIRequest{
+		Tools:    []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "read"}}, {Type: "function", Function: officialtypes.ToolFunction{Name: "apply_patch"}}},
+		Messages: messages,
+	}
+	if !shouldRequireToolCall(req, "Mình sẽ tiếp tục.") {
+		t.Fatal("read-only inspection must not complete an implicit code/game modification follow-up")
+	}
+}
+
+func TestFailedContentMutationDoesNotCountAsCompletedWork(t *testing.T) {
+	patchCall := officialtypes.ToolCallRef{ID: "call_patch", Type: "function"}
+	patchCall.Function.Name = "apply_patch"
+	patchCall.Function.Arguments = `{"patchText":"*** Begin Patch"}`
+	req := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "apply_patch"}}, {Type: "function", Function: officialtypes.ToolFunction{Name: "read"}}},
+		Messages: []officialtypes.APIMessage{
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "tạo game html trên desktop"}},
+			{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{patchCall}},
+			{Role: "tool", ToolCallID: "call_patch", Name: "apply_patch", Content: officialtypes.MessageContent{TextValue: "apply_patch verification failed: Failed to find expected lines"}},
+		},
+	}
+	if hasContentMutationToolCallSinceLastUser(req.Messages) {
+		t.Fatal("a failed apply_patch must not satisfy the content mutation gate")
+	}
+	if !latestToolResultFailed(req.Messages) {
+		t.Fatal("failed tool result should activate recovery behavior")
+	}
+	if !shouldRequireToolCall(req, "Đã sửa xong.") {
+		t.Fatal("failed mutation must require another real tool action")
+	}
+}
+
 func TestConversationRequestsActionDoesNotForceExplanation(t *testing.T) {
 	messages := []officialtypes.APIMessage{{
 		Role:    "user",
