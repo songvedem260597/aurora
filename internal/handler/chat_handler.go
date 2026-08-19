@@ -96,13 +96,28 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 
 	// 工具调用模式判定
 	toolsEnabled := requestToolCallingEnabled(&original_request, h.cfg)
+	originalMessageCount := len(original_request.Messages)
+	originalToolCount := len(original_request.Tools)
 	// OpenCode includes its host tools on every turn, including a plain request
 	// to describe an image that is already attached. That turn does not need the
 	// buffered tool-protocol classifier: route it through the normal streaming
 	// path so the first visible text reaches OpenCode as soon as upstream emits
 	// it. Coding/edit requests that happen to include an image keep tool mode.
-	if prepareDirectInformationalAttachment(&original_request) {
+	directInformationalAttachment := prepareDirectInformationalAttachment(&original_request)
+	if directInformationalAttachment {
 		toolsEnabled = false
+	}
+	if original_requestHasFiles(original_request) {
+		fmt.Fprintf(
+			os.Stderr,
+			"[chatgpt-route] direct_vision=%t messages=%d->%d tools=%d->%d stream=%t\n",
+			directInformationalAttachment,
+			originalMessageCount,
+			len(original_request.Messages),
+			originalToolCount,
+			len(original_request.Tools),
+			original_request.Stream,
+		)
 	}
 	toolStreamRequested := original_request.Stream
 	if toolsEnabled && h.cfg.StreamMode {

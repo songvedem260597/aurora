@@ -453,6 +453,28 @@ func TestPrepareDirectInformationalAttachmentPreservesStreamingImage(t *testing.
 	}
 }
 
+func TestPrepareDirectInformationalAttachmentAcceptsOpenCodeReadHelperText(t *testing.T) {
+	request := &officialtypes.APIRequest{
+		Stream: true,
+		Messages: []officialtypes.APIMessage{{
+			Role: "user",
+			Content: officialtypes.MessageContent{Parts: []officialtypes.MessageContentPart{
+				{Type: "text", Text: `Called the Read tool with the following input: {"filePath":"C:\\Users\\test\\outfit.jpg"}`},
+				{Type: "text", Text: "Image read successfully"},
+				{Type: "image_url", ImageURL: &officialtypes.ImageURLDetail{URL: "data:image/jpeg;base64,/9j/4AAQ"}},
+				{Type: "text", Text: "Test lần 3: mô tả trang phục trong ảnh bằng một câu."},
+			}},
+		}},
+	}
+
+	if !prepareDirectInformationalAttachment(request) {
+		t.Fatal("OpenCode's synthetic Read helper text incorrectly disabled direct vision")
+	}
+	if len(request.Messages) != 1 || len(request.Messages[0].Files()) != 1 {
+		t.Fatalf("current OpenCode image turn was not preserved: %#v", request.Messages)
+	}
+}
+
 func TestAttachmentMutationKeepsToolProtocolInUpstreamRequest(t *testing.T) {
 	original := &officialtypes.APIRequest{
 		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
