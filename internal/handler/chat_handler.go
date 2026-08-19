@@ -690,17 +690,10 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	if requireToolCall && maxRefusalRetries > 2 {
 		maxRefusalRetries = 2
 	}
+	// Keep the streaming surface identical to a normal OpenAI-compatible
+	// provider (such as 9Router): role/content/tool_calls/finish_reason only.
+	// OpenCode renders Shell/Write/Edit rows from delta.tool_calls itself.
 	progressStarted := false
-	if streamRequested {
-		status := "⏳ Aurora đang xử lý yêu cầu..."
-		if len(originalRequest.Messages) > 0 && originalRequest.Messages[len(originalRequest.Messages)-1].IsToolResult() {
-			status = "✅ Tool vừa chạy xong — Aurora đang đọc kết quả thật và chọn bước tiếp theo..."
-		} else if requireToolCall {
-			status = "⏳ Đây là task cần thao tác thật — Aurora đang chọn tool/lệnh để chạy..."
-		}
-		beginToolProgressSSE(c, *reqModel, status)
-		progressStarted = true
-	}
 	if logPath := h.cfg.DebugToolLog; logPath != "" {
 		debugText := fmt.Sprintf("require_tool_call=%v messages=%d", requireToolCall, len(originalRequest.Messages))
 		if len(originalRequest.Messages) > 0 {
@@ -859,20 +852,16 @@ func writeToolCallingSSE(c *gin.Context, text string, calls []officialtypes.Tool
 	}
 
 	if len(calls) > 0 {
-		deltas := make([]officialtypes.ToolCallDelta, 0, len(calls))
-		for _, call := range calls {
-			deltas = append(deltas, officialtypes.ToolCallDelta{
-				Index: call.Index,
-				ID:    call.ID,
-				Type:  call.Type,
-				Function: officialtypes.ToolCallFuncDelta{
-					Name:      call.Function.Name,
-					Arguments: call.Function.Arguments,
-				},
-			})
+		// Match the streaming shape used by normal OpenAI-compatible agent
+		// providers (including 9Router): emit the tool identity/name first,
+		// then append function.arguments in following delta.tool_calls chunks.
+		// This lets OpenCode create the visible tool row before all arguments
+		// have arrived, instead of receiving one monolithic tool-call chunk.
+		for _, deltas := range toolcall.StreamToToolCallDeltas(calls) {
+			chunk := officialtypes.NewToolCallChunk(model, deltas...)
+			c.Writer.WriteString("data: " + chunk.String() + "\n\n")
+			c.Writer.Flush()
 		}
-		chunk := officialtypes.NewToolCallChunk(model, deltas...)
-		c.Writer.WriteString("data: " + chunk.String() + "\n\n")
 		stop := officialtypes.NewToolCallStopChunk(model, conversationID)
 		c.Writer.WriteString("data: " + stop.String() + "\n\n")
 	} else {
