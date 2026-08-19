@@ -412,6 +412,34 @@ func latestUserHasAttachment(messages []officialtypes.APIMessage) bool {
 	return len(messages[i].Files()) > 0
 }
 
+func looksLikeAttachmentAccessRefusal(text string) bool {
+	t := normalizeIntentText(text)
+	markers := []string{
+		"khong xem duoc anh",
+		"khong the xem anh",
+		"khong the nhin anh",
+		"chua the nhin truc tiep anh",
+		"khong the nhin truc tiep anh",
+		"tep khong duoc ho tro",
+		"file khong duoc ho tro",
+		"khong ho tro dau vao hinh anh",
+		"khong duoc ho tro cho dau vao hinh anh",
+		"cannot see the image",
+		"can't see the image",
+		"cannot view the image",
+		"cannot access the image",
+		"image input is not supported",
+		"unsupported image input",
+		"unsupported image",
+	}
+	for _, marker := range markers {
+		if strings.Contains(t, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 func incompleteAgentResponse(text string) bool {
 	return strings.TrimSpace(text) == "" || looksLikeDeferredToolAction(text)
 }

@@ -353,6 +353,27 @@ func TestAttachedImageQuestionDoesNotEscalateSandboxStyleTextToHostTool(t *testi
 	}
 }
 
+func TestAttachmentAccessRefusalDetection(t *testing.T) {
+	for _, text := range []string{
+		"Mình chưa thể nhìn trực tiếp ảnh này vì hệ thống báo tệp không được hỗ trợ cho đầu vào hình ảnh.",
+		"Mình không xem được ảnh này.",
+		"Image input is not supported here.",
+		"I cannot access the image in this conversation.",
+	} {
+		if !looksLikeAttachmentAccessRefusal(text) {
+			t.Fatalf("expected attachment refusal to be detected: %q", text)
+		}
+	}
+	for _, text := range []string{
+		"Đây là mannequin mặc váy đỏ phong cách gothic.",
+		"Ảnh hơi mờ nhưng vẫn thấy một người đứng trước gương.",
+	} {
+		if looksLikeAttachmentAccessRefusal(text) {
+			t.Fatalf("normal vision answer must not be treated as refusal: %q", text)
+		}
+	}
+}
+
 func TestContentTaskExtensionMatchingRequiresFilenameBoundary(t *testing.T) {
 	imageHelper := `Called the Read tool with the following input: {"filePath":"C:\\Users\\uchih\\Downloads\\_any.clothes_1756508549.jpg"}`
 	if textLooksLikeContentTask(normalizeIntentText(imageHelper)) {

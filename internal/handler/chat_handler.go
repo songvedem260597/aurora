@@ -702,6 +702,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	semanticRetry := false
 	semanticFollowupContent := false
 	completionRetry := false
+	visionRetry := false
 	if requireToolCall && maxRefusalRetries > 2 {
 		maxRefusalRetries = 2
 	}
@@ -769,6 +770,8 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 				retrySuffix += "\nThis is a create/modify task. Read-only inspection (pwd/ls/tree/Test-Path/read) does NOT count as doing the work. Emit a REAL write/edit/create tool call or a mutating shell command for the user's requested target NOW. Do not describe a plan, do not claim a file exists, and do not use a read-only tool as a substitute."
 			}
 			translated.AddMessage("user", retrySuffix)
+		} else if visionRetry {
+			translated.AddMessage("user", "\n\n[HOST VISION RETRY: The latest user turn already contains an image attachment that was successfully uploaded and included in this request. Inspect that attached image directly and answer the user's image question from the visual content. Do not claim that image input is unsupported, unavailable, unreadable, or missing unless the request itself returns a real attachment/file error. Start with <agent_intent>answer</agent_intent> and then answer normally. Do not call a host tool just to inspect an attachment that is already present.]")
 		} else if completionRetry {
 			translated.AddMessage("user", "\n\n[HOST COMPLETION RETRY: The required host tool work has already completed and was verified. Your previous response contained only an internal intent marker. Start with <agent_intent>answer</agent_intent> and then give the user a concise final summary of the completed work. Do not call another tool and do not output an empty answer.]")
 		} else if semanticRetry {
@@ -847,6 +850,13 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			}
 			continue
 		}
+		if latestUserHasAttachment(originalRequest.Messages) && looksLikeAttachmentAccessRefusal(cleanText) {
+			visionRetry = true
+			if attempt < maxRefusalRetries-1 {
+				fmt.Fprintf(os.Stderr, "[chatgpt] model denied access to an already-uploaded attachment (attempt %d/%d), retrying vision answer\n", attempt+1, maxRefusalRetries)
+				continue
+			}
+		}
 		if looksLikeDeferredToolAction(cleanText) {
 			semanticRetry = true
 			userIndex := lastUserIndex(originalRequest.Messages)
@@ -896,6 +906,14 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			"message": "action required a real tool call, but the model did not execute one",
 			"type":    "tool_call_error",
 			"code":    "missing_tool_call",
+		}})
+		return
+	}
+	if visionRetry && latestUserHasAttachment(originalRequest.Messages) && looksLikeAttachmentAccessRefusal(lastText) {
+		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
+			"message": "model failed to inspect an attachment that was successfully uploaded",
+			"type":    "vision_error",
+			"code":    "attachment_access_refusal",
 		}})
 		return
 	}
