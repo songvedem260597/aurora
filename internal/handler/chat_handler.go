@@ -686,6 +686,9 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	var lastConversationID string
 	var lastSentinel []map[string]interface{}
 	requireToolCall := shouldRequireToolCall(originalRequest, "")
+	if requireToolCall && maxRefusalRetries > 2 {
+		maxRefusalRetries = 2
+	}
 	if logPath := h.cfg.DebugToolLog; logPath != "" {
 		debugText := fmt.Sprintf("require_tool_call=%v messages=%d", requireToolCall, len(originalRequest.Messages))
 		if len(originalRequest.Messages) > 0 {
@@ -699,10 +702,16 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		translated := baseTranslated
 		if attempt > 0 || requireToolCall {
 			retrySuffix := "\n\n[HOST TOOL PROTOCOL OVERRIDE: Do NOT look for a native ChatGPT bash/shell/file tool. The surrounding OpenCode host intercepts <tool_call> blocks from your TEXT response and executes them on the user's REAL machine. Your job is only to emit the protocol block; the host performs the command and sends the real result back on the next turn. Therefore never say the tool is unavailable, never guess command output or paths, and never describe what you plan to inspect. Respond with ONLY one or more <tool_call> blocks, starting immediately with '<tool_call>'.]"
-			if forced := originalRequest.ToolChoice.ForcedFunctionName(); forced == "" {
-				if example := toolcall.FirstToolCallExample(tools, toolcall.ExtractWorkingDir(originalRequest.Messages)); example != "" {
-					retrySuffix += "\nThe host accepts this exact style; emit a call like this now:\n" + example
+			mutationRequired := conversationRequestsMutation(originalRequest.Messages) && !hasMutationToolCallSinceLastUser(originalRequest.Messages)
+			if !mutationRequired {
+				if forced := originalRequest.ToolChoice.ForcedFunctionName(); forced == "" {
+					if example := toolcall.FirstToolCallExample(tools, toolcall.ExtractWorkingDir(originalRequest.Messages)); example != "" {
+						retrySuffix += "\nThe host accepts this exact style; emit a call like this now:\n" + example
+					}
 				}
+			}
+			if mutationRequired {
+				retrySuffix += "\nThis is a create/modify task. Read-only inspection (pwd/ls/tree/Test-Path/read) does NOT count as doing the work. Emit a REAL write/edit/create tool call or a mutating shell command for the user's requested target NOW. Do not describe a plan, do not claim a file exists, and do not use a read-only tool as a substitute."
 			}
 			translated.AddMessage("user", retrySuffix)
 		}
@@ -765,13 +774,6 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		}
 	}
 
-	if len(lastToolCalls) == 0 && requireToolCall {
-		lastToolCalls = fallbackToolCalls(tools, originalRequest.Messages)
-		if len(lastToolCalls) > 0 {
-			lastText = ""
-			fmt.Fprintln(os.Stderr, "[chatgpt] model did not emit a tool call; using safe host-tool fallback")
-		}
-	}
 	if len(lastToolCalls) > 0 {
 		if streamRequested {
 			writeToolCallingSSE(c, "", lastToolCalls, *reqModel, lastConversationID)
@@ -786,7 +788,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	}
 	if requireToolCall {
 		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
-			"message": "model failed to produce a valid tool call and no safe fallback tool was available",
+			"message": "action required a real tool call, but the model did not execute one",
 			"type":    "tool_call_error",
 			"code":    "missing_tool_call",
 		}})
@@ -798,23 +800,6 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		return
 	}
 	c.JSON(200, officialtypes.NewChatCompletionWithMetadata(lastText, *inputTokens, outputTokens, *reqModel, lastConversationID, lastSentinel))
-}
-
-func fallbackToolCalls(tools []officialtypes.Tool, messages []officialtypes.APIMessage) []officialtypes.ToolCall {
-	example := toolcall.FirstToolCallExample(tools, toolcall.ExtractWorkingDir(messages))
-	if example == "" {
-		return nil
-	}
-	parser := toolcall.NewParser()
-	_, calls := parser.Feed(example)
-	if len(calls) == 0 {
-		_, extra := parser.Flush()
-		calls = append(calls, extra...)
-	}
-	for i := range calls {
-		calls[i].Index = i
-	}
-	return calls
 }
 
 func writeToolCallingSSE(c *gin.Context, text string, calls []officialtypes.ToolCall, model, conversationID string) {

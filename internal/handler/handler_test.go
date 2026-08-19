@@ -192,23 +192,37 @@ func TestToolResultAllowsFollowupAnswer(t *testing.T) {
 	}
 }
 
-func TestFallbackToolCallsUsesSafeReadOnlyFirstStep(t *testing.T) {
-	tools := []officialtypes.Tool{{
-		Type: "function",
-		Function: officialtypes.ToolFunction{
-			Name:       "bash",
-			Parameters: json.RawMessage(`{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`),
+func TestMutationTaskRejectsReadOnlyToolResult(t *testing.T) {
+	call := officialtypes.ToolCallRef{ID: "call_read", Type: "function"}
+	call.Function.Name = "bash"
+	call.Function.Arguments = `{"command":"Test-Path -LiteralPath C:\\Users\\uchih\\Desktop"}`
+	req := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: []officialtypes.APIMessage{
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "hãy tạo game pvz trên desktop bằng html đi"}},
+			{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{call}},
+			{Role: "tool", ToolCallID: "call_read", Content: officialtypes.MessageContent{TextValue: "True"}},
 		},
-	}}
-	calls := fallbackToolCalls(tools, []officialtypes.APIMessage{{Role: "user", Content: officialtypes.MessageContent{TextValue: "fix the repo"}}})
-	if len(calls) != 1 {
-		t.Fatalf("expected one fallback tool call, got %d", len(calls))
 	}
-	if calls[0].Function.Name != "bash" {
-		t.Fatalf("fallback tool = %q, want bash", calls[0].Function.Name)
+	if !shouldRequireToolCall(req, "Mình đang tạo game thật trên Desktop.") {
+		t.Fatal("read-only Test-Path must not satisfy a create/modify task")
 	}
-	if !strings.Contains(calls[0].Function.Arguments, "Get-ChildItem -Force") {
-		t.Fatalf("fallback arguments = %q, want read-only workspace listing", calls[0].Function.Arguments)
+}
+
+func TestMutationTaskAllowsFinalAfterWrite(t *testing.T) {
+	call := officialtypes.ToolCallRef{ID: "call_write", Type: "function"}
+	call.Function.Name = "write"
+	call.Function.Arguments = `{"filePath":"C:\\Users\\uchih\\Desktop\\pvz\\index.html","content":"<html></html>"}`
+	req := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "write"}}},
+		Messages: []officialtypes.APIMessage{
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "hãy tạo game pvz trên desktop bằng html đi"}},
+			{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{call}},
+			{Role: "tool", ToolCallID: "call_write", Content: officialtypes.MessageContent{TextValue: "written"}},
+		},
+	}
+	if shouldRequireToolCall(req, "Đã tạo file và sẽ báo kết quả.") {
+		t.Fatal("a real write tool result should satisfy the mutation gate")
 	}
 }
 

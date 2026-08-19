@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"aurora/httpclient/bogdanfinn"
 	"aurora/internal/accounts"
@@ -22,6 +23,7 @@ import (
 	"github.com/bogdanfinn/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"golang.org/x/text/unicode/norm"
 )
 
 var ErrNoAvailable = errors.New("no available account of the requested type")
@@ -296,38 +298,134 @@ func shouldRequireToolCall(request *officialtypes.APIRequest, text string) bool 
 			return true
 		}
 	}
-	// Once the host has executed a tool and returned role=tool/function, the
-	// previous user's execution request has been satisfied for that step. Do not
-	// re-force a call just because an older user message said "use bash"; allow
-	// the model to consume the real result and either finish or voluntarily call
-	// another tool.
-	if len(request.Messages) > 0 && request.Messages[len(request.Messages)-1].IsToolResult() {
-		return false
+	actionTask := userExplicitlyRequestsTool(request.Messages) || conversationRequestsAction(request.Messages)
+	mutationTask := conversationRequestsMutation(request.Messages)
+	if mutationTask && !hasMutationToolCallSinceLastUser(request.Messages) {
+		return true
 	}
-	if userExplicitlyRequestsTool(request.Messages) || conversationRequestsAction(request.Messages) {
+	if actionTask && !hasToolCallSinceLastUser(request.Messages) {
 		return true
 	}
 	return looksLikeSandboxRefusal(text) || looksLikeDeferredToolAction(text)
 }
 
+func normalizeIntentText(s string) string {
+	s = strings.ToLower(norm.NFD.String(s))
+	var b strings.Builder
+	for _, r := range s {
+		if unicode.Is(unicode.Mn, r) {
+			continue
+		}
+		if r == 'đ' {
+			r = 'd'
+		}
+		b.WriteRune(r)
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+func lastUserIndex(messages []officialtypes.APIMessage) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return i
+		}
+	}
+	return -1
+}
+
+func hasToolCallSinceLastUser(messages []officialtypes.APIMessage) bool {
+	start := lastUserIndex(messages)
+	for i := start + 1; i < len(messages); i++ {
+		if messages[i].Role == "assistant" && len(messages[i].ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasMutationToolCallSinceLastUser(messages []officialtypes.APIMessage) bool {
+	start := lastUserIndex(messages)
+	for i := start + 1; i < len(messages); i++ {
+		if messages[i].Role != "assistant" {
+			continue
+		}
+		for _, call := range messages[i].ToolCalls {
+			if toolCallMutatesWorkspace(call) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func toolCallMutatesWorkspace(call officialtypes.ToolCallRef) bool {
+	name := normalizeIntentText(call.Function.Name)
+	for _, marker := range []string{"write", "edit", "apply_patch", "patch", "write_file", "create_file", "str_replace", "replace"} {
+		if name == marker || strings.Contains(name, marker) {
+			return true
+		}
+	}
+	if name != "bash" && name != "shell" && name != "terminal" && name != "exec" && name != "run_command" {
+		return false
+	}
+	args := strings.ToLower(call.Function.Arguments)
+	markers := []string{"set-content", "add-content", "out-file", "new-item", "copy-item", "move-item", "remove-item", "rename-item", "mkdir ", "touch ", "tee ", "cat >", "cat >>", ">>", "cp ", "mv ", "rm ", "del ", "npm install", "pnpm add", "yarn add", "pip install"}
+	for _, marker := range markers {
+		if strings.Contains(args, marker) {
+			return true
+		}
+	}
+	return false
+}
+func conversationRequestsMutation(messages []officialtypes.APIMessage) bool {
+	i := lastUserIndex(messages)
+	if i < 0 {
+		return false
+	}
+	text := normalizeIntentText(messages[i].Text())
+	markers := []string{"hay tao ", "tao di", "tao game", "tao file", "tao app", "tao web", "tao project", "tao thu muc", "lam di", "lam luon", "tien hanh", "lam game", "lam app", "lam web", "viet ", "sua ", "them ", "xoa ", "cap nhat code", "fix it", "fix this", "implement ", "create ", "make ", "write ", "edit ", "modify ", "change ", "add ", "remove ", "delete ", "refactor", "rename ", "move file"}
+	for _, marker := range markers {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	confirmations := map[string]bool{"ok": true, "okay": true, "ok lam di": true, "lam di": true, "duoc": true, "tiep di": true, "continue": true, "go ahead": true}
+	if confirmations[text] && i > 0 {
+		for j := i - 1; j >= 0; j-- {
+			if messages[j].Role != "assistant" {
+				continue
+			}
+			if assistantPromisesMutation(messages[j].Text()) {
+				return true
+			}
+			break
+		}
+	}
+	return false
+}
+
+func assistantPromisesMutation(text string) bool {
+	t := normalizeIntentText(text)
+	markers := []string{"i'll fix", "i will fix", "i'll implement", "i will implement", "i'll create", "i will create", "i'll write", "i will write", "tao se sua", "tao se lam", "tao se tao", "tao se viet", "minh se sua", "minh se lam", "minh se tao", "minh se viet"}
+	for _, marker := range markers {
+		if strings.Contains(t, marker) {
+			return true
+		}
+	}
+	return false
+}
 func userExplicitlyRequestsTool(messages []officialtypes.APIMessage) bool {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role != "user" {
 			continue
 		}
-		t := strings.ToLower(messages[i].Text())
-		negative := []string{"do not use a tool", "don't use a tool", "do not use tools", "không dùng tool", "đừng dùng tool"}
-		for _, marker := range negative {
+		t := normalizeIntentText(messages[i].Text())
+		for _, marker := range []string{"do not use a tool", "don't use a tool", "do not use tools", "khong dung tool", "dung dung tool"} {
 			if strings.Contains(t, marker) {
 				return false
 			}
 		}
-		markers := []string{
-			"must use the shell", "must use shell", "must use bash", "must use a tool",
-			"use the shell tool", "use shell", "use bash", "use a tool", "call the tool",
-			"run a command", "execute a command", "phải dùng shell", "phải dùng bash",
-			"phải dùng tool", "dùng shell", "dùng bash", "dùng tool", "gọi tool", "chạy lệnh",
-		}
+		markers := []string{"must use the shell", "must use shell", "must use bash", "must use a tool", "use the shell tool", "use shell", "use bash", "use a tool", "call the tool", "run a command", "execute a command", "phai dung shell", "phai dung bash", "phai dung tool", "dung shell", "dung bash", "goi tool", "chay lenh"}
 		for _, marker := range markers {
 			if strings.Contains(t, marker) {
 				return true
@@ -339,49 +437,24 @@ func userExplicitlyRequestsTool(messages []officialtypes.APIMessage) bool {
 }
 
 func conversationRequestsAction(messages []officialtypes.APIMessage) bool {
-	lastUser := ""
-	lastUserIndex := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
-			lastUser = strings.ToLower(strings.TrimSpace(messages[i].Text()))
-			lastUserIndex = i
-			break
-		}
-	}
-	if lastUser == "" {
+	i := lastUserIndex(messages)
+	if i < 0 {
 		return false
 	}
-
-	// Direct action requests that should be executed rather than acknowledged.
-	actionMarkers := []string{
-		"làm đi", "làm luôn", "tiến hành", "sửa đi", "sửa luôn", "thêm vào", "thêm vô",
-		"xóa đi", "xoá đi", "tạo đi", "chạy đi", "test đi", "build đi", "deploy đi",
-		"commit đi", "push đi", "kiểm tra đi", "check đi", "đọc file", "mở file", "xem repo",
-		"kiểm tra repo", "xem cấu trúc", "sửa code", "thêm code", "update code", "cập nhật code",
-		"fix it", "fix this", "do it", "go ahead", "implement it", "implement this", "add it",
-		"remove it", "delete it", "create it", "run it", "test it", "build it", "deploy it",
-		"commit it", "push it", "check the repo", "inspect the repo", "read the file", "open the file",
-		"modify the code", "change the code", "update the code", "refactor", "rename", "move the file",
-	}
-	for _, marker := range actionMarkers {
-		if strings.Contains(lastUser, marker) {
+	text := normalizeIntentText(messages[i].Text())
+	markers := []string{"lam di", "lam luon", "tien hanh", "sua di", "sua luon", "them vao", "them vo", "xoa di", "tao di", "chay di", "test di", "build di", "deploy di", "commit di", "push di", "kiem tra di", "check di", "doc file", "mo file", "xem repo", "kiem tra repo", "xem cau truc", "sua code", "them code", "update code", "cap nhat code", "fix it", "fix this", "do it", "go ahead", "implement it", "implement this", "add it", "remove it", "delete it", "create it", "run it", "test it", "build it", "deploy it", "commit it", "push it", "check the repo", "inspect the repo", "read the file", "open the file", "modify the code", "change the code", "update the code", "refactor", "rename", "move the file"}
+	for _, marker := range markers {
+		if strings.Contains(text, marker) {
 			return true
 		}
 	}
-
-	// Short confirmations inherit the actionable intent from the previous
-	// assistant turn. This covers the common OpenCode flow: assistant says
-	// "I'll inspect/fix/test it" and the user replies only "ok làm đi" / "ok".
-	confirmations := map[string]bool{
-		"ok": true, "okay": true, "ok làm đi": true, "làm đi": true, "ừ": true, "uh": true,
-		"được": true, "được làm đi": true, "tiếp đi": true, "continue": true, "go ahead": true,
-	}
-	if confirmations[lastUser] && lastUserIndex > 0 {
-		for i := lastUserIndex - 1; i >= 0; i-- {
-			if messages[i].Role != "assistant" {
+	confirmations := map[string]bool{"ok": true, "okay": true, "ok lam di": true, "lam di": true, "u": true, "uh": true, "duoc": true, "duoc lam di": true, "tiep di": true, "continue": true, "go ahead": true}
+	if confirmations[text] && i > 0 {
+		for j := i - 1; j >= 0; j-- {
+			if messages[j].Role != "assistant" {
 				continue
 			}
-			if looksLikeDeferredToolAction(messages[i].Text()) || assistantPromisesAction(messages[i].Text()) {
+			if looksLikeDeferredToolAction(messages[j].Text()) || assistantPromisesAction(messages[j].Text()) {
 				return true
 			}
 			break
@@ -391,20 +464,8 @@ func conversationRequestsAction(messages []officialtypes.APIMessage) bool {
 }
 
 func assistantPromisesAction(text string) bool {
-	if text == "" {
-		return false
-	}
-	t := strings.ToLower(text)
-	markers := []string{
-		"i'll fix", "i will fix", "i'll implement", "i will implement", "i'll add", "i will add",
-		"i'll remove", "i will remove", "i'll create", "i will create", "i'll run", "i will run",
-		"i'll test", "i will test", "i'll build", "i will build", "i'll deploy", "i will deploy",
-		"i'll commit", "i will commit", "i'll push", "i will push", "i'll inspect", "i will inspect",
-		"tao sẽ sửa", "tao sẽ làm", "tao sẽ thêm", "tao sẽ xóa", "tao sẽ xoá", "tao sẽ tạo",
-		"tao sẽ chạy", "tao sẽ test", "tao sẽ build", "tao sẽ deploy", "tao sẽ commit", "tao sẽ push",
-		"tôi sẽ sửa", "tôi sẽ làm", "tôi sẽ thêm", "tôi sẽ tạo", "tôi sẽ chạy", "mình sẽ sửa",
-		"mình sẽ làm", "mình sẽ thêm", "mình sẽ tạo", "mình sẽ chạy",
-	}
+	t := normalizeIntentText(text)
+	markers := []string{"i'll fix", "i will fix", "i'll implement", "i will implement", "i'll add", "i will add", "i'll remove", "i will remove", "i'll create", "i will create", "i'll run", "i will run", "i'll test", "i will test", "i'll build", "i will build", "i'll deploy", "i will deploy", "i'll commit", "i will commit", "i'll push", "i will push", "i'll inspect", "i will inspect", "tao se sua", "tao se lam", "tao se them", "tao se xoa", "tao se tao", "tao se chay", "tao se test", "tao se build", "tao se deploy", "tao se commit", "tao se push", "toi se sua", "toi se lam", "toi se them", "toi se tao", "toi se chay", "minh se sua", "minh se lam", "minh se them", "minh se tao", "minh se chay"}
 	for _, marker := range markers {
 		if strings.Contains(t, marker) {
 			return true
@@ -417,21 +478,8 @@ func looksLikeDeferredToolAction(text string) bool {
 	if text == "" {
 		return false
 	}
-	t := strings.ToLower(strings.TrimSpace(text))
-	markers := []string{
-		"i'll inspect", "i will inspect", "let me inspect", "i'm going to inspect",
-		"i'll check", "i will check", "let me check", "i'm going to check",
-		"i'll read", "i will read", "let me read", "i'll open", "i will open", "let me open",
-		"i'll run", "i will run", "let me run", "i'll execute", "i will execute",
-		"i'll create", "i will create", "i'll edit", "i will edit", "i'll modify", "i will modify",
-		"i'll test", "i will test", "i'll build", "i will build", "i'll start by", "i will start by",
-		"tao sẽ xem", "tao sẽ kiểm tra", "tao sẽ đọc", "tao sẽ mở", "tao sẽ chạy",
-		"tao sẽ tạo", "tao sẽ sửa", "tao sẽ test", "tao sẽ build", "tao bắt đầu bằng",
-		"tôi sẽ xem", "tôi sẽ kiểm tra", "tôi sẽ đọc", "tôi sẽ chạy", "tôi sẽ tạo", "tôi sẽ sửa",
-		"mình sẽ xem", "mình sẽ kiểm tra", "mình sẽ đọc", "mình sẽ chạy", "mình sẽ tạo", "mình sẽ sửa",
-		"để tao xem", "để tao kiểm tra", "để tôi xem", "để tôi kiểm tra", "để mình xem", "để mình kiểm tra",
-		"sẽ xem cấu trúc", "sẽ kiểm tra repo", "sẽ đọc file", "sẽ chạy lệnh",
-	}
+	t := normalizeIntentText(text)
+	markers := []string{"i'll inspect", "i will inspect", "let me inspect", "i'm going to inspect", "i'll check", "i will check", "let me check", "i'm going to check", "i'll read", "i will read", "let me read", "i'll open", "i will open", "let me open", "i'll run", "i will run", "let me run", "i'll execute", "i will execute", "i'll create", "i will create", "i'll edit", "i will edit", "i'll modify", "i will modify", "i'll test", "i will test", "i'll build", "i will build", "i'll start by", "i will start by", "tao se xem", "tao se kiem tra", "tao se doc", "tao se mo", "tao se chay", "tao se tao", "tao se sua", "tao se test", "tao se build", "tao bat dau bang", "toi se xem", "toi se kiem tra", "toi se doc", "toi se chay", "toi se tao", "toi se sua", "minh se xem", "minh se kiem tra", "minh se doc", "minh se chay", "minh se tao", "minh se sua", "de tao xem", "de tao kiem tra", "de toi xem", "de toi kiem tra", "de minh xem", "de minh kiem tra", "se xem cau truc", "se kiem tra repo", "se doc file", "se chay lenh", "dang tao", "dang sua", "dang lam"}
 	for _, marker := range markers {
 		if strings.Contains(t, marker) {
 			return true
