@@ -374,6 +374,34 @@ func TestAttachmentAccessRefusalDetection(t *testing.T) {
 	}
 }
 
+func TestVisionAnswerRetryIncludesMarkerOnlyResponse(t *testing.T) {
+	messages := []officialtypes.APIMessage{{
+		Role: "user",
+		Content: officialtypes.MessageContent{Parts: []officialtypes.MessageContentPart{
+			{Type: "image_url", ImageURL: &officialtypes.ImageURLDetail{URL: "data:image/jpeg;base64,/9j/4AAQ"}},
+			{Type: "text", Text: "Ảnh này là ảnh gì?"},
+		}},
+	}}
+
+	for _, text := range []string{
+		"",
+		"Mình không xem được ảnh này.",
+	} {
+		if !shouldRetryVisionAnswer(messages, text) {
+			t.Fatalf("expected vision retry for %q", text)
+		}
+	}
+	if shouldRetryVisionAnswer(messages, "Đây là mannequin mặc váy đỏ.") {
+		t.Fatal("normal vision answer must not retry")
+	}
+	if shouldRetryVisionAnswer([]officialtypes.APIMessage{{
+		Role:    "user",
+		Content: officialtypes.MessageContent{TextValue: "Giải thích closure"},
+	}}, "") {
+		t.Fatal("an empty text-only answer must keep the ordinary completion retry path")
+	}
+}
+
 func TestContentTaskExtensionMatchingRequiresFilenameBoundary(t *testing.T) {
 	imageHelper := `Called the Read tool with the following input: {"filePath":"C:\\Users\\uchih\\Downloads\\_any.clothes_1756508549.jpg"}`
 	if textLooksLikeContentTask(normalizeIntentText(imageHelper)) {

@@ -850,10 +850,11 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			}
 			continue
 		}
-		if latestUserHasAttachment(originalRequest.Messages) && looksLikeAttachmentAccessRefusal(cleanText) {
+		if shouldRetryVisionAnswer(originalRequest.Messages, cleanText) {
 			visionRetry = true
+			completionRetry = false
 			if attempt < maxRefusalRetries-1 {
-				fmt.Fprintf(os.Stderr, "[chatgpt] model denied access to an already-uploaded attachment (attempt %d/%d), retrying vision answer\n", attempt+1, maxRefusalRetries)
+				fmt.Fprintf(os.Stderr, "[chatgpt] model failed to answer from an already-uploaded attachment (attempt %d/%d), retrying vision answer\n", attempt+1, maxRefusalRetries)
 				continue
 			}
 		}
@@ -875,7 +876,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 				continue
 			}
 		}
-		if strings.TrimSpace(cleanText) == "" {
+		if strings.TrimSpace(cleanText) == "" && !visionRetry {
 			completionRetry = true
 			if attempt < maxRefusalRetries-1 {
 				fmt.Fprintf(os.Stderr, "[chatgpt] empty response after removing internal intent marker (attempt %d/%d), retrying final summary\n", attempt+1, maxRefusalRetries)
@@ -909,9 +910,9 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		}})
 		return
 	}
-	if visionRetry && latestUserHasAttachment(originalRequest.Messages) && looksLikeAttachmentAccessRefusal(lastText) {
+	if visionRetry && shouldRetryVisionAnswer(originalRequest.Messages, lastText) {
 		c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
-			"message": "model failed to inspect an attachment that was successfully uploaded",
+			"message": "model failed to answer from an attachment that was successfully uploaded",
 			"type":    "vision_error",
 			"code":    "attachment_access_refusal",
 		}})

@@ -440,6 +440,16 @@ func looksLikeAttachmentAccessRefusal(text string) bool {
 	return false
 }
 
+// shouldRetryVisionAnswer covers both explicit refusals and the other failure
+// shape seen from the upstream model: returning only the hidden answer marker.
+// An empty answer is only treated as a vision failure when the latest user
+// turn really contains an attachment, so ordinary empty tool/final-summary
+// recovery keeps its existing behavior.
+func shouldRetryVisionAnswer(messages []officialtypes.APIMessage, text string) bool {
+	return latestUserHasAttachment(messages) &&
+		(strings.TrimSpace(text) == "" || looksLikeAttachmentAccessRefusal(text))
+}
+
 func incompleteAgentResponse(text string) bool {
 	return strings.TrimSpace(text) == "" || looksLikeDeferredToolAction(text)
 }
