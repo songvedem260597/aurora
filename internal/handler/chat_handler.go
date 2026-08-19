@@ -687,34 +687,6 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	var lastConversationID string
 	var lastSentinel []map[string]interface{}
 	requireToolCall := shouldRequireToolCall(originalRequest, "")
-	toolChoiceDebug := "<unset>"
-	if originalRequest.ToolChoice != nil {
-		toolChoiceDebug = originalRequest.ToolChoice.Type
-		if forced := originalRequest.ToolChoice.ForcedFunctionName(); forced != "" {
-			toolChoiceDebug += ":" + forced
-		}
-	}
-	lastUser := lastUserIndex(originalRequest.Messages)
-	currentContentMatch := ""
-	previousContent := false
-	hasToolAfterUser := false
-	if lastUser >= 0 {
-		currentContentMatch = contentTaskMatch(normalizeIntentText(originalRequest.Messages[lastUser].Text()))
-		previousContent = previousContentTask(originalRequest.Messages, lastUser)
-		hasToolAfterUser = hasToolCallSinceLastUser(originalRequest.Messages)
-	}
-	fmt.Fprintf(os.Stderr, "[tool-gate] initial require=%t tool_choice=%s attachment=%t explicit=%t action=%t mutation=%t content=%t content_match=%s previous_content=%t tool_after_user=%t\n",
-		requireToolCall,
-		toolChoiceDebug,
-		latestUserHasAttachment(originalRequest.Messages),
-		userExplicitlyRequestsTool(originalRequest.Messages),
-		conversationRequestsAction(originalRequest.Messages),
-		conversationRequestsMutation(originalRequest.Messages),
-		conversationRequiresContentWork(originalRequest.Messages),
-		currentContentMatch,
-		previousContent,
-		hasToolAfterUser,
-	)
 	semanticRetry := false
 	semanticFollowupContent := false
 	completionRetry := false
