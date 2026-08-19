@@ -384,6 +384,31 @@ func TestToolUpstreamRequestCompactsLongHistory(t *testing.T) {
 	}
 }
 
+func TestForceRequiredUpstreamToolChoiceAlignsAutoPrompt(t *testing.T) {
+	request := &officialtypes.APIRequest{
+		Tools:      []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		ToolChoice: &officialtypes.ToolChoice{Type: "auto"},
+	}
+	forceRequiredUpstreamToolChoice(request, true)
+	if request.ToolChoice == nil || request.ToolChoice.Type != "required" {
+		t.Fatalf("upstream tool choice = %#v, want required", request.ToolChoice)
+	}
+}
+
+func TestForceRequiredUpstreamToolChoicePreservesForcedFunction(t *testing.T) {
+	request := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		ToolChoice: &officialtypes.ToolChoice{
+			Type:     "function",
+			Function: &officialtypes.ToolChoiceFunction{Name: "bash"},
+		},
+	}
+	forceRequiredUpstreamToolChoice(request, true)
+	if got := request.ToolChoice.ForcedFunctionName(); got != "bash" {
+		t.Fatalf("forced function = %q, want bash", got)
+	}
+}
+
 func TestInformationalAttachmentUsesSmallRecentWindow(t *testing.T) {
 	messages := []officialtypes.APIMessage{officialtypes.NewTextMessage("system", "system")}
 	for i := 0; i < 40; i++ {

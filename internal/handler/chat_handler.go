@@ -708,8 +708,10 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	if maxRefusalRetries <= 0 {
 		maxRefusalRetries = 3
 	}
+	requireToolCall := shouldRequireToolCall(originalRequest, "")
 
 	upstreamRequest, informationalAttachment := toolUpstreamRequest(originalRequest)
+	forceRequiredUpstreamToolChoice(&upstreamRequest, requireToolCall)
 	var baseTranslated chatgpt_types.ChatGPTRequest
 	activateNextAttachmentAccount := func() bool {
 		if h.accountPool == nil || !h.accountPool.ReportAttachmentLimited(account, time.Hour) {
@@ -765,7 +767,6 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	var lastText string
 	var lastConversationID string
 	var lastSentinel []map[string]interface{}
-	requireToolCall := shouldRequireToolCall(originalRequest, "")
 	semanticRetry := false
 	semanticFollowupContent := false
 	completionRetry := false
@@ -945,17 +946,6 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			semanticFollowupContent = previousContentTask(originalRequest.Messages, lastUserIndex(originalRequest.Messages)) || hasSuccessfulMutationBefore(originalRequest.Messages, lastUserIndex(originalRequest.Messages))
 		}
 		if requireToolCall {
-			debugResponse := result.Text
-			if len(debugResponse) > 1200 {
-				debugResponse = debugResponse[:1200] + "..."
-			}
-			fmt.Fprintf(
-				os.Stderr,
-				"[chatgpt-tool-response] attempt=%d intent=%q raw=%q\n",
-				attempt+1,
-				agentIntent,
-				debugResponse,
-			)
 			if attempt < maxRefusalRetries-1 {
 				fmt.Fprintf(os.Stderr, "[chatgpt] tool call required but none produced (attempt %d/%d), retrying\n", attempt+1, maxRefusalRetries)
 			}

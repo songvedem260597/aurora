@@ -481,6 +481,20 @@ func toolUpstreamRequest(request *officialtypes.APIRequest) (officialtypes.APIRe
 	return prepared, true
 }
 
+func forceRequiredUpstreamToolChoice(request *officialtypes.APIRequest, required bool) {
+	if request == nil || !required || len(request.Tools) == 0 {
+		return
+	}
+	if request.ToolChoice != nil && (request.ToolChoice.IsForcedNone() || request.ToolChoice.RequiresCall()) {
+		return
+	}
+	// The semantic gate has already established that this turn must execute a
+	// host tool. Keep the converter's system instructions and final nudge in
+	// agreement with that decision; leaving the upstream choice as "auto"
+	// invites the model to guess an answer in prose before the retry override.
+	request.ToolChoice = &officialtypes.ToolChoice{Type: "required"}
+}
+
 // compactUpstreamHistory bounds the transcript replayed to ChatGPT Web. The
 // original request remains available to Aurora's semantic/tool gates, while
 // upstream only receives recent context. This matters for OpenCode because it
