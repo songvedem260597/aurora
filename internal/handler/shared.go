@@ -296,6 +296,14 @@ func shouldRequireToolCall(request *officialtypes.APIRequest, text string) bool 
 			return true
 		}
 	}
+	// Once the host has executed a tool and returned role=tool/function, the
+	// previous user's execution request has been satisfied for that step. Do not
+	// re-force a call just because an older user message said "use bash"; allow
+	// the model to consume the real result and either finish or voluntarily call
+	// another tool.
+	if len(request.Messages) > 0 && request.Messages[len(request.Messages)-1].IsToolResult() {
+		return false
+	}
 	if userExplicitlyRequestsTool(request.Messages) || conversationRequestsAction(request.Messages) {
 		return true
 	}

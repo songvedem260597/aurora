@@ -178,6 +178,20 @@ func TestConversationRequestsActionAfterOpenAIJSONRoundTrip(t *testing.T) {
 	}
 }
 
+func TestToolResultAllowsFollowupAnswer(t *testing.T) {
+	req := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: []officialtypes.APIMessage{
+			{Role: "user", Content: officialtypes.MessageContent{TextValue: "You must use bash to print pwd, then report the actual result."}},
+			{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{{ID: "call_1", Type: "function"}}},
+			{Role: "tool", ToolCallID: "call_1", Name: "bash", Content: officialtypes.MessageContent{TextValue: "/c/Users/test/project"}},
+		},
+	}
+	if shouldRequireToolCall(req, "") {
+		t.Fatal("a completed tool result must allow the model to answer instead of forcing another tool call")
+	}
+}
+
 // ─── Test: original_requestHasFiles ──────────────────────────────
 
 func TestOriginalRequestHasFiles(t *testing.T) {
