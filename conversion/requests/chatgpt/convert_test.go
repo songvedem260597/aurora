@@ -424,6 +424,55 @@ func TestBuildMessagePartsUploadsOpenCodeImageURLWireFormat(t *testing.T) {
 	}
 }
 
+func TestConvertAPIRequestUploadsOnlyLatestHistoricalAttachment(t *testing.T) {
+	const firstDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	const latestDataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	request := official.APIRequest{
+		Model: "gpt-5-6-thinking",
+		Messages: []official.APIMessage{
+			{
+				Role: "user",
+				Content: official.MessageContent{Parts: []official.MessageContentPart{
+					{Type: "text", Text: "describe the first image"},
+					{Type: "image_url", ImageURL: &official.ImageURLDetail{URL: firstDataURL}},
+				}},
+			},
+			official.NewTextMessage("assistant", "the first image was black"),
+			{
+				Role: "user",
+				Content: official.MessageContent{Parts: []official.MessageContentPart{
+					{Type: "text", Text: "describe the newly attached image"},
+					{Type: "image_url", ImageURL: &official.ImageURLDetail{URL: latestDataURL}},
+				}},
+			},
+		},
+	}
+	client := &inlineUploadClient{}
+	account := accounts.NewAccount("test", accounts.TypeFree, "access-token")
+
+	converted, err := ConvertAPIRequest(request, account, "", client)
+	if err != nil {
+		t.Fatalf("convert request: %v", err)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("upload request count = %d, want one create + put + confirm sequence for only the latest image", len(client.requests))
+	}
+	if got := converted.Messages[0].Content.ContentType; got != "text" {
+		t.Fatalf("historical attachment content type = %q, want text", got)
+	}
+	if len(converted.Messages[0].Content.Parts) != 1 || converted.Messages[0].Content.Parts[0] != "describe the first image" {
+		t.Fatalf("historical attachment text was not preserved: %#v", converted.Messages[0].Content.Parts)
+	}
+	latest := converted.Messages[len(converted.Messages)-1]
+	if latest.Content.ContentType != "multimodal_text" {
+		t.Fatalf("latest attachment content type = %q, want multimodal_text", latest.Content.ContentType)
+	}
+	imagePart, ok := latest.Content.Parts[0].(map[string]interface{})
+	if !ok || imagePart["asset_pointer"] != "file-service://file-uploaded" {
+		t.Fatalf("latest image part = %#v, want uploaded file pointer", latest.Content.Parts[0])
+	}
+}
+
 func TestConvertAPIRequestReturnsInlineAttachmentUploadFailure(t *testing.T) {
 	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	message := official.APIMessage{

@@ -93,6 +93,7 @@ func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.
 	if maxTokenHint != "" {
 		systemMessages = append(systemMessages, maxTokenHint)
 	}
+	latestFileMessage := latestFileMessageIndex(api_request.Messages)
 	for _, apiMessage := range api_request.Messages {
 		if apiMessage.Role == "system" {
 			systemMessages = append(systemMessages, apiMessage.Text())
@@ -104,7 +105,7 @@ func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.
 		chatgpt_request.AddMessage("system", strings.Join(systemMessages, "\n\n"))
 	}
 
-	for _, apiMessage := range api_request.Messages {
+	for messageIndex, apiMessage := range api_request.Messages {
 		if apiMessage.Role == "system" {
 			continue // 已合并到头部
 		}
@@ -140,7 +141,7 @@ func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.
 			}
 			continue
 		}
-		parts, metadata, err := buildMessageParts(apiMessage, client, account, proxy)
+		parts, metadata, err := buildRequestMessageParts(apiMessage, messageIndex == latestFileMessage, client, account, proxy)
 		if err != nil {
 			return chatgpt_request, err
 		}
@@ -160,6 +161,28 @@ func ConvertAPIRequest(api_request official_types.APIRequest, account *accounts.
 	}
 
 	return chatgpt_request, nil
+}
+
+// buildRequestMessageParts keeps the most recent attachment-bearing turn as
+// multimodal input and replays older attachment turns as text-only history.
+// OpenAI-compatible clients resend the full conversation on every request. If
+// every historical inline image is uploaded again, a long OpenCode session can
+// contain many duplicate file pointers, making requests slow and causing the
+// upstream model to lose track of the image from the latest turn.
+func buildRequestMessageParts(message official_types.APIMessage, includeFiles bool, client httpclient.AuroraHttpClient, account *accounts.Account, proxy string) ([]interface{}, map[string]interface{}, error) {
+	if !includeFiles && len(message.Files()) > 0 {
+		return []interface{}{message.Text()}, nil, nil
+	}
+	return buildMessageParts(message, client, account, proxy)
+}
+
+func latestFileMessageIndex(messages []official_types.APIMessage) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if len(messages[i].Files()) > 0 {
+			return i
+		}
+	}
+	return -1
 }
 
 func ConvertTTSAPIRequest(input string) chatgpt_types.ChatGPTRequest {
