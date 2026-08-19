@@ -509,6 +509,37 @@ func TestConvertAPIRequestUploadsOnlyLatestHistoricalAttachment(t *testing.T) {
 	}
 }
 
+func TestConvertAPIRequestDoesNotReuploadImageOnTextFollowup(t *testing.T) {
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	request := official.APIRequest{
+		Model: "gpt-5-6-thinking",
+		Messages: []official.APIMessage{
+			{
+				Role: "user",
+				Content: official.MessageContent{Parts: []official.MessageContentPart{
+					{Type: "text", Text: "describe this image"},
+					{Type: "image_url", ImageURL: &official.ImageURLDetail{URL: dataURL}},
+				}},
+			},
+			official.NewTextMessage("assistant", "a black dress"),
+			official.NewTextMessage("user", "why was that slow?"),
+		},
+	}
+	client := &inlineUploadClient{}
+	account := accounts.NewAccount("followup-test", accounts.TypeFree, "followup-access-token")
+
+	converted, err := ConvertAPIRequest(request, account, "", client)
+	if err != nil {
+		t.Fatalf("convert text follow-up: %v", err)
+	}
+	if len(client.requests) != 0 {
+		t.Fatalf("historical image was uploaded again on a text follow-up: %d requests", len(client.requests))
+	}
+	if got := converted.Messages[len(converted.Messages)-1].Content.Parts[0]; got != "why was that slow?" {
+		t.Fatalf("latest text follow-up was not preserved: %#v", got)
+	}
+}
+
 func TestConvertAPIRequestReturnsInlineAttachmentUploadFailure(t *testing.T) {
 	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	message := official.APIMessage{

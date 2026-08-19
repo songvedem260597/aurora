@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -346,6 +347,70 @@ func TestInformationalAttachmentStripsToolProtocolFromUpstreamRequest(t *testing
 	}
 	if len(original.Tools) != 1 || original.ToolChoice != choice || original.ParallelToolCalls == nil {
 		t.Fatal("preparing the upstream request must not mutate the original OpenCode request")
+	}
+}
+
+func TestToolUpstreamRequestCompactsLongHistory(t *testing.T) {
+	messages := []officialtypes.APIMessage{
+		officialtypes.NewTextMessage("system", "keep this system instruction"),
+	}
+	for i := 0; i < 80; i++ {
+		role := "assistant"
+		if i%4 == 0 {
+			role = "user"
+		}
+		messages = append(messages, officialtypes.NewTextMessage(role, fmt.Sprintf("history-%d", i)))
+	}
+	original := &officialtypes.APIRequest{
+		Tools:    []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: messages,
+	}
+
+	prepared, informational := toolUpstreamRequest(original)
+	if informational {
+		t.Fatal("text-only request unexpectedly entered informational attachment mode")
+	}
+	if len(prepared.Messages) >= len(messages) || len(prepared.Messages) > 33 {
+		t.Fatalf("history was not bounded: got %d messages from %d", len(prepared.Messages), len(messages))
+	}
+	if prepared.Messages[0].Role != "system" || prepared.Messages[0].Text() != "keep this system instruction" {
+		t.Fatalf("system instruction was not preserved: %#v", prepared.Messages[0])
+	}
+	if prepared.Messages[len(prepared.Messages)-1].Text() != "history-79" {
+		t.Fatal("latest message was dropped during compaction")
+	}
+	if len(original.Messages) != len(messages) {
+		t.Fatal("compaction mutated the original request")
+	}
+}
+
+func TestInformationalAttachmentUsesSmallRecentWindow(t *testing.T) {
+	messages := []officialtypes.APIMessage{officialtypes.NewTextMessage("system", "system")}
+	for i := 0; i < 40; i++ {
+		messages = append(messages, officialtypes.NewTextMessage("user", fmt.Sprintf("old-%d", i)))
+		messages = append(messages, officialtypes.NewTextMessage("assistant", fmt.Sprintf("answer-%d", i)))
+	}
+	messages = append(messages, officialtypes.APIMessage{
+		Role: "user",
+		Content: officialtypes.MessageContent{Parts: []officialtypes.MessageContentPart{
+			{Type: "text", Text: "đây là gì"},
+			{Type: "image_url", ImageURL: &officialtypes.ImageURLDetail{URL: "data:image/jpeg;base64,/9j/4AAQ"}},
+		}},
+	})
+	original := &officialtypes.APIRequest{
+		Tools:    []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: messages,
+	}
+
+	prepared, informational := toolUpstreamRequest(original)
+	if !informational {
+		t.Fatal("image question did not enter informational attachment mode")
+	}
+	if len(prepared.Messages) > 9 {
+		t.Fatalf("informational image history is still too large: %d messages", len(prepared.Messages))
+	}
+	if len(prepared.Messages[len(prepared.Messages)-1].Files()) != 1 {
+		t.Fatal("latest image attachment was dropped")
 	}
 }
 

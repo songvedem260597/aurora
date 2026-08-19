@@ -177,10 +177,17 @@ func buildRequestMessageParts(message official_types.APIMessage, includeFiles bo
 }
 
 func latestFileMessageIndex(messages []official_types.APIMessage) int {
+	// OpenAI-compatible clients resend the whole transcript on each turn. Only
+	// the current (last) user turn may introduce a new upload; otherwise a text
+	// follow-up after an image would upload that historical image again.
 	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != "user" {
+			continue
+		}
 		if len(messages[i].Files()) > 0 {
 			return i
 		}
+		return -1
 	}
 	return -1
 }

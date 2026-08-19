@@ -450,13 +450,45 @@ func toolUpstreamRequest(request *officialtypes.APIRequest) (officialtypes.APIRe
 		return officialtypes.APIRequest{}, false
 	}
 	prepared := *request
+	prepared.Messages = compactUpstreamHistory(request.Messages, 32)
 	if !latestUserAttachmentAllowsTextAnswer(request.Messages) {
 		return prepared, false
 	}
 	prepared.Tools = nil
 	prepared.ToolChoice = nil
 	prepared.ParallelToolCalls = nil
+	prepared.Messages = compactUpstreamHistory(request.Messages, 8)
 	return prepared, true
+}
+
+// compactUpstreamHistory bounds the transcript replayed to ChatGPT Web. The
+// original request remains available to Aurora's semantic/tool gates, while
+// upstream only receives recent context. This matters for OpenCode because it
+// resends the complete tool transcript on every request; very long sessions
+// otherwise spend a minute replaying hundreds of old tool messages.
+func compactUpstreamHistory(messages []officialtypes.APIMessage, maxRecent int) []officialtypes.APIMessage {
+	if maxRecent <= 0 || len(messages) <= maxRecent {
+		return append([]officialtypes.APIMessage(nil), messages...)
+	}
+
+	start := len(messages) - maxRecent
+	// Avoid beginning with a detached tool result when a nearby user boundary
+	// exists inside the retained window.
+	for i := start; i < len(messages); i++ {
+		if messages[i].Role == "user" {
+			start = i
+			break
+		}
+	}
+
+	result := make([]officialtypes.APIMessage, 0, len(messages)-start+2)
+	for i := 0; i < start; i++ {
+		if messages[i].Role == "system" {
+			result = append(result, messages[i])
+		}
+	}
+	result = append(result, messages[start:]...)
+	return result
 }
 
 func latestUserHasAttachment(messages []officialtypes.APIMessage) bool {
