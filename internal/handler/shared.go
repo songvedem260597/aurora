@@ -363,6 +363,11 @@ func conversationRequiresContentWork(messages []officialtypes.APIMessage) bool {
 			return true
 		}
 	}
+	for _, ext := range []string{".html", ".htm", ".css", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".go", ".py", ".rs", ".java", ".kt", ".c", ".cpp", ".cc", ".h", ".hpp", ".cs", ".php", ".rb", ".vue", ".svelte"} {
+		if strings.Contains(text, ext) {
+			return true
+		}
+	}
 	return false
 }
 
