@@ -12,15 +12,16 @@ import (
 )
 
 var ErrNoAvailable = errors.New("no available account of the requested type")
+var ErrAttachmentLimited = errors.New("all accounts of the requested type are attachment limited")
 
 // Pool 账号池管理，按类型分三个数组，Acquire 直接取无需遍历
 // 临时账号存放在单独的 map[string]*Account 中,以 token hash 为 key
 type Pool struct {
-	mu       sync.Mutex
-	noauth   []*Account
-	free     []*Account
-	puid     []*Account
-	cursors  [3]int // 0=noauth,1=free,2=puid
+	mu      sync.Mutex
+	noauth  []*Account
+	free    []*Account
+	puid    []*Account
+	cursors [3]int // 0=noauth,1=free,2=puid
 
 	// 临时账号 (外部传入的 accessToken 创建的)
 	tempMu    sync.RWMutex
@@ -81,6 +82,16 @@ func (p *Pool) AddAccount(acct *Account) {
 
 // Acquire 从对应类型数组中轮询获取一个可用账号
 func (p *Pool) Acquire(acctType AccountType) (*Account, error) {
+	return p.acquire(acctType, false)
+}
+
+// AcquireForAttachments selects an account whose attachment cooldown elapsed.
+// A modality-specific quota must not remove the account from normal text use.
+func (p *Pool) AcquireForAttachments(acctType AccountType) (*Account, error) {
+	return p.acquire(acctType, true)
+}
+
+func (p *Pool) acquire(acctType AccountType, needsAttachments bool) (*Account, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -95,13 +106,29 @@ func (p *Pool) Acquire(acctType AccountType) (*Account, error) {
 	}
 
 	entries := *slice
+	now := time.Now()
+	sawAttachmentLimited := false
 	for i := 0; i < len(entries); i++ {
 		cur := (p.cursors[idx] + i) % len(entries)
+		if entries[cur].Status == StatusRateLimited && !entries[cur].RateLimitedUntil.After(now) {
+			entries[cur].Status = StatusActive
+			entries[cur].RateLimitedUntil = time.Time{}
+		}
 		if entries[cur].Status == StatusActive {
+			if needsAttachments && entries[cur].AttachmentLimitedUntil.After(now) {
+				sawAttachmentLimited = true
+				continue
+			}
+			if needsAttachments {
+				entries[cur].AttachmentLimitedUntil = time.Time{}
+			}
 			p.cursors[idx] = (cur + 1) % len(entries)
 			entries[cur].TotalCalls++
 			return entries[cur], nil
 		}
+	}
+	if needsAttachments && sawAttachmentLimited {
+		return nil, ErrAttachmentLimited
 	}
 
 	return nil, ErrNoAvailable
@@ -195,9 +222,9 @@ func (p *Pool) GetOrCreateTempAccount(token, userAgent string, proxyURL string) 
 
 	// 2) 没命中,创建一个
 	fp := BrowserFingerprint{
-		OaiDeviceID:  uuid.NewString(),
-		OaiSessionID: uuid.NewString(),
-		UserAgent:    userAgent,
+		OaiDeviceID:         uuid.NewString(),
+		OaiSessionID:        uuid.NewString(),
+		UserAgent:           userAgent,
 		ScreenWidth:         1920,
 		ScreenHeight:        1080,
 		HardwareConcurrency: 8,
@@ -285,4 +312,37 @@ func TokenHashOf(token string) string {
 func tokenHashOf(token string) string {
 	h := sha256.Sum256([]byte(token))
 	return fmt.Sprintf("%x", h[:16])
+}
+
+// ReportAttachmentLimited temporarily removes a pool-managed account from
+// attachment rotation while keeping it available for ordinary text requests.
+// It returns false for caller-supplied/temporary accounts so handlers do not
+// unexpectedly replace a user's explicit credential with a pooled account.
+func (p *Pool) ReportAttachmentLimited(acct *Account, cooldown time.Duration) bool {
+	if acct == nil {
+		return false
+	}
+	if cooldown <= 0 {
+		cooldown = time.Hour
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	managed := false
+	for _, list := range [][]*Account{p.noauth, p.free, p.puid} {
+		for _, candidate := range list {
+			if candidate == acct {
+				managed = true
+				break
+			}
+		}
+		if managed {
+			break
+		}
+	}
+	if !managed {
+		return false
+	}
+	acct.AttachmentLimitedUntil = time.Now().Add(cooldown)
+	acct.FailedCalls++
+	return true
 }

@@ -35,12 +35,12 @@ func (t AccountType) String() string {
 type AccountStatus int
 
 const (
-	StatusPending    AccountStatus = iota // 初始化中
-	StatusActive                          // 正常
-	StatusExpired                         // Token 过期，可续期
-	StatusRateLimited                     // 被限流，等待冷却
-	StatusDisabled                        // 手动停用
-	StatusBanned                          // 被封禁
+	StatusPending     AccountStatus = iota // 初始化中
+	StatusActive                           // 正常
+	StatusExpired                          // Token 过期，可续期
+	StatusRateLimited                      // 被限流，等待冷却
+	StatusDisabled                         // 手动停用
+	StatusBanned                           // 被封禁
 )
 
 func (s AccountStatus) String() string {
@@ -68,10 +68,10 @@ type Account struct {
 	Type AccountType
 
 	// 认证
-	Token         string // access_token 或 UUID
-	RefreshToken  string // 用于自动续期（/auth/refresh）
-	SessionToken  string // 仅免费账号有，用于续期（/auth/session）
-	IsTemporary   bool   // 外部传入 token 临时创建的账号,会被 GC 清理
+	Token        string // access_token 或 UUID
+	RefreshToken string // 用于自动续期（/auth/refresh）
+	SessionToken string // 仅免费账号有，用于续期（/auth/session）
+	IsTemporary  bool   // 外部传入 token 临时创建的账号,会被 GC 清理
 
 	// 身份
 	PUID             string
@@ -89,6 +89,10 @@ type Account struct {
 	// 状态
 	Status    AccountStatus
 	ExpiresAt time.Time
+	// RateLimitedUntil applies to the whole account. AttachmentLimitedUntil is
+	// separate because an exhausted upload quota must not disable normal text.
+	RateLimitedUntil       time.Time
+	AttachmentLimitedUntil time.Time
 
 	// 统计
 	TotalCalls  int64

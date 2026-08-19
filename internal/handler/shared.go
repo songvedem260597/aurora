@@ -46,6 +46,23 @@ func respondRequestConversionError(c *gin.Context, err error) {
 	}})
 }
 
+func isAttachmentQuotaError(message string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(normalized, "attachment limit") ||
+		strings.Contains(normalized, "attachment quota")
+}
+
+func respondAttachmentQuotaError(c *gin.Context) {
+	// 422 is deliberate: OpenCode retries transient 5xx responses, which turns
+	// an exhausted attachment quota into an endless Thinking state.
+	c.JSON(http.StatusUnprocessableEntity, gin.H{"error": gin.H{
+		"message": "all available ChatGPT accounts have exhausted their attachment quota; try again later",
+		"type":    "attachment_limit_error",
+		"param":   "messages",
+		"code":    "attachment_limit",
+	}})
+}
+
 // resolveAccount 从请求 Authorization header 解析账号
 // 替代旧的 secretFromAuthorization + accessTokenFromRefreshToken
 // 返回 (account, http_status, error)
@@ -76,7 +93,16 @@ func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, nee
 
 	// 无 token 或匹配全局密钥 → 先尝试 free,再 fallback 到 noauth
 	if token == "" || (expected != "" && token == expected) {
-		acct, err := pool.Acquire(accounts.TypeFree)
+		var acct *accounts.Account
+		var err error
+		if needsPaid {
+			acct, err = pool.AcquireForAttachments(accounts.TypeFree)
+		} else {
+			acct, err = pool.Acquire(accounts.TypeFree)
+		}
+		if errors.Is(err, accounts.ErrAttachmentLimited) {
+			return nil, http.StatusUnprocessableEntity, accounts.ErrAttachmentLimited
+		}
 		if err != nil || acct == nil {
 			// free 池空时(无 session/access/refresh token 账号),fallback 到 noauth(UUID 设备)
 			acct, err = pool.Acquire(accounts.TypeNoAuth)
@@ -142,7 +168,16 @@ func resolveAccount(c *gin.Context, pool *accounts.Pool, cfg *config.Config, nee
 	}
 
 	// 兜底：从池里取
-	acct, err := pool.Acquire(accounts.TypeFree)
+	var acct *accounts.Account
+	var err error
+	if needsPaid {
+		acct, err = pool.AcquireForAttachments(accounts.TypeFree)
+	} else {
+		acct, err = pool.Acquire(accounts.TypeFree)
+	}
+	if errors.Is(err, accounts.ErrAttachmentLimited) {
+		return nil, http.StatusUnprocessableEntity, accounts.ErrAttachmentLimited
+	}
 	if err != nil {
 		return nil, http.StatusUnauthorized, ErrNoAvailable
 	}

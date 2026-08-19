@@ -350,6 +350,12 @@ func TestBuildMessagePartsUploadsOpenCodeFileDataURL(t *testing.T) {
 	if createPayload["file_name"] != "pixel.png" || createPayload["mime_type"] != "image/png" {
 		t.Fatalf("create upload payload lost OpenCode attachment metadata: %#v", createPayload)
 	}
+	if createPayload["store_in_library"] != false {
+		t.Fatalf("inline OpenCode attachment must be ephemeral, payload: %#v", createPayload)
+	}
+	if _, exists := createPayload["library_persistence_mode"]; exists {
+		t.Fatalf("ephemeral upload unexpectedly requested library persistence: %#v", createPayload)
+	}
 	if client.requests[1].method != httpclient.PUT || client.requests[1].url != "https://upload.example.test/blob" {
 		t.Fatalf("blob upload request = %s %s", client.requests[1].method, client.requests[1].url)
 	}
@@ -421,6 +427,36 @@ func TestBuildMessagePartsUploadsOpenCodeImageURLWireFormat(t *testing.T) {
 	attachments, ok := metadata["attachments"].([]interface{})
 	if !ok || len(attachments) != 1 {
 		t.Fatalf("attachments = %#v, want one uploaded attachment", metadata["attachments"])
+	}
+}
+
+func TestBuildMessagePartsCachesIdenticalInlineImageForSameAccount(t *testing.T) {
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	message := official.APIMessage{
+		Role: "user",
+		Content: official.MessageContent{Parts: []official.MessageContentPart{
+			{Type: "text", Text: "inspect this image"},
+			{Type: "image_url", ImageURL: &official.ImageURLDetail{URL: dataURL}},
+		}},
+	}
+	client := &inlineUploadClient{}
+	account := accounts.NewAccount("cache-test", accounts.TypeFree, "cache-access-token")
+
+	firstParts, _, err := buildMessageParts(message, client, account, "")
+	if err != nil {
+		t.Fatalf("first build: %v", err)
+	}
+	secondParts, _, err := buildMessageParts(message, client, account, "")
+	if err != nil {
+		t.Fatalf("second build: %v", err)
+	}
+	if len(client.requests) != 3 {
+		t.Fatalf("upload request count = %d, want one create/put/confirm sequence", len(client.requests))
+	}
+	first := firstParts[0].(map[string]interface{})["asset_pointer"]
+	second := secondParts[0].(map[string]interface{})["asset_pointer"]
+	if first != second {
+		t.Fatalf("cached asset pointer changed: first=%v second=%v", first, second)
 	}
 }
 

@@ -938,6 +938,30 @@ func TestHandlerSeparatesAnalysisAndFinalChannels(t *testing.T) {
 	}
 }
 
+func TestHandlerReturnsUpstreamErrorWithoutWritingHTTPResponse(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := "data: {\"error\":\"You've hit your attachment limit. Please try again later.\"}\n\ndata: [DONE]\n\n"
+	response := &http.Response{Body: io.NopCloser(strings.NewReader(body))}
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+
+	result := HandlerDetailedWithOptions(c, response, nil, nil, "request-id", chatGPTRequestForTest(), false, "auto", HandlerDetailedOptions{ReturnUpstreamErrors: true})
+
+	if result.UpstreamError != "You've hit your attachment limit. Please try again later." {
+		t.Fatalf("upstream error = %q", result.UpstreamError)
+	}
+	if writer.Body.Len() != 0 {
+		t.Fatalf("handler committed HTTP response before caller could fail over: %q", writer.Body.String())
+	}
+}
+
+func TestUpstreamErrorMessageExtractsStructuredMessage(t *testing.T) {
+	got := upstreamErrorMessage(map[string]interface{}{"message": "quota reached", "code": "limit"})
+	if got != "quota reached" {
+		t.Fatalf("upstreamErrorMessage = %q, want quota reached", got)
+	}
+}
+
 func TestHandlerAppliesBatchPatch(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := strings.Join([]string{

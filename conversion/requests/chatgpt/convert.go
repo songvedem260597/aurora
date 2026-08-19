@@ -382,7 +382,7 @@ func uploadInlineImage(file official_types.FileAttachment, client httpclient.Aur
 		filename = "image.png"
 	}
 
-	uploaded, status, err := backendchatgpt.UploadFile(client, account, proxy, filename, contentType, data)
+	uploaded, status, err := backendchatgpt.UploadEphemeralFile(client, account, proxy, filename, contentType, data)
 	if err != nil {
 		return file, fmt.Errorf("upload attachment %q failed with HTTP %d: %w", filename, status, err)
 	}

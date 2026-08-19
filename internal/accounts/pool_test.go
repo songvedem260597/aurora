@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"testing"
+	"time"
 )
 
 func TestPoolAcquireByType(t *testing.T) {
@@ -33,6 +34,55 @@ func TestPoolAcquireByType(t *testing.T) {
 	}
 	if acct.Type != TypeNoAuth {
 		t.Errorf("got type %s, want noauth", acct.Type)
+	}
+}
+
+func TestPoolTemporarilySkipsRateLimitedAccount(t *testing.T) {
+	pool := NewPool(nil)
+	limited := NewAccount("limited", TypeFree, "token-1")
+	fallback := NewAccount("fallback", TypeFree, "token-2")
+	limited.Status = StatusActive
+	fallback.Status = StatusActive
+	pool.AddAccount(limited)
+	pool.AddAccount(fallback)
+
+	first, err := pool.Acquire(TypeFree)
+	if err != nil || first != limited {
+		t.Fatalf("first Acquire = %v, %v; want limited account", first, err)
+	}
+	if !pool.ReportAttachmentLimited(limited, time.Hour) {
+		t.Fatal("managed account was not marked attachment limited")
+	}
+	next, err := pool.AcquireForAttachments(TypeFree)
+	if err != nil || next != fallback {
+		t.Fatalf("fallback Acquire = %v, %v; want fallback account", next, err)
+	}
+
+	textAccount, err := pool.Acquire(TypeFree)
+	if err != nil || textAccount != limited {
+		t.Fatalf("text Acquire = %v, %v; attachment quota must not disable text", textAccount, err)
+	}
+
+	fallback.Status = StatusDisabled
+	limited.AttachmentLimitedUntil = time.Now().Add(-time.Second)
+	recovered, err := pool.AcquireForAttachments(TypeFree)
+	if err != nil || recovered != limited {
+		t.Fatalf("recovered Acquire = %v, %v; want cooled-down account", recovered, err)
+	}
+	if limited.Status != StatusActive || !limited.AttachmentLimitedUntil.IsZero() {
+		t.Fatalf("limited account did not recover: status=%s until=%v", limited.Status, limited.AttachmentLimitedUntil)
+	}
+}
+
+func TestPoolDoesNotRateLimitUnmanagedAccount(t *testing.T) {
+	pool := NewPool(nil)
+	external := NewAccount("external", TypeFree, "token")
+	external.Status = StatusActive
+	if pool.ReportAttachmentLimited(external, time.Hour) {
+		t.Fatal("unmanaged caller credential must not be added to pool rotation")
+	}
+	if external.Status != StatusActive {
+		t.Fatalf("unmanaged account status changed to %s", external.Status)
 	}
 }
 

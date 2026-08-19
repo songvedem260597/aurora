@@ -687,6 +687,36 @@ func TestOriginalRequestHasFiles(t *testing.T) {
 	}
 }
 
+func TestAttachmentQuotaErrorClassificationAndEnvelope(t *testing.T) {
+	if !isAttachmentQuotaError("You've hit your attachment limit. Please try again later.") {
+		t.Fatal("expected ChatGPT attachment-limit message to be classified")
+	}
+	if isAttachmentQuotaError("the model returned an empty response") {
+		t.Fatal("unrelated upstream error was classified as attachment quota")
+	}
+
+	gin.SetMode(gin.TestMode)
+	writer := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(writer)
+	respondAttachmentQuotaError(c)
+	if writer.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", writer.Code)
+	}
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(writer.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if envelope.Error.Message == "" || envelope.Error.Type != "attachment_limit_error" || envelope.Error.Code != "attachment_limit" {
+		t.Fatalf("unexpected error envelope: %#v", envelope.Error)
+	}
+}
+
 // ─── Test: countMessagesTokens ───────────────────────────────────
 
 func TestCountMessagesTokens(t *testing.T) {

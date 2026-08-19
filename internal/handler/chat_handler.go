@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,9 +61,13 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 		return
 	}
 
-	account, _, err := resolveAccount(c, h.accountPool, h.cfg, original_requestHasFiles(original_request))
+	account, accountStatus, err := resolveAccount(c, h.accountPool, h.cfg, original_requestHasFiles(original_request))
 	if err != nil {
-		c.JSON(400, gin.H{"error": gin.H{
+		if errors.Is(err, accounts.ErrAttachmentLimited) {
+			respondAttachmentQuotaError(c)
+			return
+		}
+		c.JSON(accountStatus, gin.H{"error": gin.H{
 			"message": err.Error(),
 			"type":    "authorization_error",
 			"param":   "Authorization",
@@ -95,6 +100,19 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 	if toolsEnabled && h.cfg.StreamMode {
 		original_request.Stream = false
 	}
+	reqModel := original_request.Model
+	if reqModel == "" {
+		reqModel = "auto"
+	}
+
+	// The tool handler performs its own conversion because it may strip the
+	// host-tool protocol for informational image turns. Branch before the
+	// generic conversion so an inline image is not uploaded twice.
+	var clientState *chatgpt.ChatClientState
+	if toolsEnabled {
+		h.handleToolCalling(c, &original_request, &client, account, &clientState, &reqModel, &uid, &proxyUrl, &input_tokens, toolStreamRequested)
+		return
+	}
 
 	// Convert the chat request to a ChatGPT request
 	translated_request, err := chatgptrequestconverter.ConvertAPIRequest(original_request, account, proxyUrl, client)
@@ -104,7 +122,6 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 	}
 
 	// 按 conversationID 复用 ChatClientState
-	var clientState *chatgpt.ChatClientState
 	if translated_request.ConversationID != "" {
 		clientState = h.sessions.Get(translated_request.ConversationID)
 	}
@@ -113,17 +130,6 @@ func (h *ChatHandler) Nightmare(c *gin.Context) {
 	}
 	clientState.ConversationID = translated_request.ConversationID
 	clientState.ParentMessageID = translated_request.ParentMessageID
-
-	reqModel := original_request.Model
-	if reqModel == "" {
-		reqModel = "auto"
-	}
-
-	// 工具调用提前分支
-	if toolsEnabled {
-		h.handleToolCalling(c, &original_request, &client, account, &clientState, &reqModel, &uid, &proxyUrl, &input_tokens, toolStreamRequested)
-		return
-	}
 
 	response, wsConn, turnStile, status, err := conversationClientOrder(&client, account, translated_request, proxyUrl, original_request.Stream, clientState, h.accountPool)
 	if err != nil {
@@ -681,19 +687,56 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	}
 
 	upstreamRequest, informationalAttachment := toolUpstreamRequest(originalRequest)
-	baseTranslated, err := chatgptrequestconverter.ConvertAPIRequest(upstreamRequest, account, *proxyUrl, *client)
-	if err != nil {
+	var baseTranslated chatgpt_types.ChatGPTRequest
+	activateNextAttachmentAccount := func() bool {
+		if h.accountPool == nil || !h.accountPool.ReportAttachmentLimited(account, time.Hour) {
+			return false
+		}
+		next, acquireErr := h.accountPool.AcquireForAttachments(account.Type)
+		if acquireErr != nil || next == nil {
+			return false
+		}
+		account = next
+		*proxyUrl = next.Proxy
+		if accountClient, ok := next.Client.(*bogdanfinn.TlsClient); ok && accountClient != nil {
+			*client = accountClient
+		} else {
+			*client = setupClientWithProxy(next.Proxy)
+		}
+		*clientState = chatgpt.NewChatClientState()
+		return true
+	}
+	convertForCurrentAccount := func() error {
+		translated, convertErr := chatgptrequestconverter.ConvertAPIRequest(upstreamRequest, account, *proxyUrl, *client)
+		if convertErr != nil {
+			return convertErr
+		}
+		baseTranslated = translated
+		if baseTranslated.ConversationID != "" {
+			*clientState = h.sessions.Get(baseTranslated.ConversationID)
+		}
+		if *clientState == nil {
+			*clientState = chatgpt.NewChatClientState()
+		}
+		(*clientState).ConversationID = baseTranslated.ConversationID
+		(*clientState).ParentMessageID = baseTranslated.ParentMessageID
+		return nil
+	}
+	for {
+		err := convertForCurrentAccount()
+		if err == nil {
+			break
+		}
+		if isAttachmentQuotaError(err.Error()) && activateNextAttachmentAccount() {
+			continue
+		}
+		if isAttachmentQuotaError(err.Error()) {
+			respondAttachmentQuotaError(c)
+			return
+		}
 		respondRequestConversionError(c, err)
 		return
 	}
-	if baseTranslated.ConversationID != "" {
-		*clientState = h.sessions.Get(baseTranslated.ConversationID)
-	}
-	if *clientState == nil {
-		*clientState = chatgpt.NewChatClientState()
-	}
-	(*clientState).ConversationID = baseTranslated.ConversationID
-	(*clientState).ParentMessageID = baseTranslated.ParentMessageID
 
 	var lastToolCalls []officialtypes.ToolCall
 	var lastText string
@@ -779,12 +822,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			translated.AddMessage("user", "\n\n[HOST INTENT RETRY: Your previous reply only deferred the next step instead of completing the turn. Re-evaluate the user's intent from the full conversation. If real host/workspace action is required, emit the correct <tool_call> immediately. If the user only wants information/explanation, answer it fully now in text. Do not reply with another promise about what you will do later.]")
 		}
 
-		// Image turns can be handed off by ChatGPT from the HTTP SSE response to
-		// a Conduit WebSocket topic even though this handler buffers the upstream
-		// response before serializing it for OpenCode. Keep a WebSocket available
-		// for informational attachments so a valid handoff does not look like an
-		// empty model response and trigger repeated 500 retries.
-		response, wsConn, _, status, err := conversationClientOrder(client, account, translated, *proxyUrl, informationalAttachment, *clientState, h.accountPool)
+		response, wsConn, _, status, err := conversationClientOrder(client, account, translated, *proxyUrl, false, *clientState, h.accountPool)
 		if err != nil {
 			if progressStarted {
 				writeToolErrorSSE(c, err.Error())
@@ -799,13 +837,45 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			return
 		}
 		result := chatgpt.HandlerDetailedWithOptions(c, response, *client, account, *uid, translated, false, *reqModel, chatgpt.HandlerDetailedOptions{
-			Websocket:        wsConn,
-			ClientState:      *clientState,
-			ArtifactDelivery: originalRequest.ArtifactDelivery,
-			ProxyURL:         *proxyUrl,
-			DebugSSE:         informationalAttachment,
+			Websocket:            wsConn,
+			ClientState:          *clientState,
+			ArtifactDelivery:     originalRequest.ArtifactDelivery,
+			ProxyURL:             *proxyUrl,
+			ReturnUpstreamErrors: true,
 		})
 		response.Body.Close()
+		if result.UpstreamError != "" {
+			if isAttachmentQuotaError(result.UpstreamError) && activateNextAttachmentAccount() {
+				for {
+					convertErr := convertForCurrentAccount()
+					if convertErr == nil {
+						break
+					}
+					if isAttachmentQuotaError(convertErr.Error()) && activateNextAttachmentAccount() {
+						continue
+					}
+					if isAttachmentQuotaError(convertErr.Error()) {
+						respondAttachmentQuotaError(c)
+						return
+					}
+					respondRequestConversionError(c, convertErr)
+					return
+				}
+				// Account rotation is transport recovery, not a semantic retry.
+				attempt--
+				continue
+			}
+			if isAttachmentQuotaError(result.UpstreamError) {
+				respondAttachmentQuotaError(c)
+				return
+			}
+			c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
+				"message": result.UpstreamError,
+				"type":    "upstream_error",
+				"code":    "upstream_error",
+			}})
+			return
+		}
 
 		agentIntent, cleanText := parseAgentIntent(result.Text)
 		lastText = cleanText

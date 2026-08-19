@@ -4,6 +4,7 @@ import (
 	"aurora/httpclient"
 	"aurora/internal/accounts"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -37,6 +38,7 @@ type uploadMetaResponse struct {
 }
 
 var uploadedFiles sync.Map
+var uploadedFilesByContent sync.Map
 
 func RegisterUploadedFile(file UploadedFile) {
 	if file.FileID == "" {
@@ -62,6 +64,17 @@ func LookupUploadedFile(fileID string) (UploadedFile, bool) {
 
 // UploadFile 执行完整三步上传,对齐 chatgpttoapi/files.go UploadFile。
 func UploadFile(client httpclient.AuroraHttpClient, account *accounts.Account, proxy, filename, mimeHint string, data []byte) (UploadedFile, int, error) {
+	return uploadFile(client, account, proxy, filename, mimeHint, data, true)
+}
+
+// UploadEphemeralFile uploads an inline conversation attachment without adding
+// it to the user's persistent ChatGPT Library. OpenCode resends data URLs, so
+// persisting every request quickly fills the account library with duplicates.
+func UploadEphemeralFile(client httpclient.AuroraHttpClient, account *accounts.Account, proxy, filename, mimeHint string, data []byte) (UploadedFile, int, error) {
+	return uploadFile(client, account, proxy, filename, mimeHint, data, false)
+}
+
+func uploadFile(client httpclient.AuroraHttpClient, account *accounts.Account, proxy, filename, mimeHint string, data []byte, storeInLibrary bool) (UploadedFile, int, error) {
 	if proxy != "" {
 		client.SetProxy(proxy)
 	}
@@ -70,6 +83,12 @@ func UploadFile(client httpclient.AuroraHttpClient, account *accounts.Account, p
 	}
 	if len(data) == 0 {
 		return UploadedFile{}, http.StatusBadRequest, fmt.Errorf("empty file data")
+	}
+	cacheKey := uploadContentCacheKey(client, account, data, storeInLibrary)
+	if cached, ok := uploadedFilesByContent.Load(cacheKey); ok {
+		if file, ok := cached.(UploadedFile); ok {
+			return file, http.StatusOK, nil
+		}
 	}
 
 	mime, ext := resolveMime(data, mimeHint)
@@ -92,12 +111,14 @@ func UploadFile(client httpclient.AuroraHttpClient, account *accounts.Account, p
 
 	// ---- Step 1: POST /backend-api/files ----
 	step1Payload := map[string]interface{}{
-		"file_name":  filename,
-		"file_size":  len(data),
-		"use_case":   useCase,
-		"mime_type":  mime,
-		"store_in_library":         true,
-		"library_persistence_mode": "opportunistic",
+		"file_name":        filename,
+		"file_size":        len(data),
+		"use_case":         useCase,
+		"mime_type":        mime,
+		"store_in_library": storeInLibrary,
+	}
+	if storeInLibrary {
+		step1Payload["library_persistence_mode"] = "opportunistic"
 	}
 	if width > 0 && height > 0 {
 		step1Payload["width"] = width
@@ -131,7 +152,29 @@ func UploadFile(client httpclient.AuroraHttpClient, account *accounts.Account, p
 		LibraryFileID: meta.LibraryFileID,
 	}
 	RegisterUploadedFile(result)
+	uploadedFilesByContent.Store(cacheKey, result)
 	return result, http.StatusOK, nil
+}
+
+func uploadContentCacheKey(client httpclient.AuroraHttpClient, account *accounts.Account, data []byte, storeInLibrary bool) string {
+	hash := sha256.New()
+	// The token and bytes are hashed and never logged. Including the client
+	// identity keeps cached file pointers inside the authenticated client scope.
+	fmt.Fprintf(hash, "%p\x00", client)
+	if account != nil {
+		hash.Write([]byte(account.Token))
+		hash.Write([]byte{0})
+		hash.Write([]byte(account.ChatGPTAccountID))
+	}
+	hash.Write([]byte{0})
+	if storeInLibrary {
+		hash.Write([]byte("library"))
+	} else {
+		hash.Write([]byte("ephemeral"))
+	}
+	hash.Write([]byte{0})
+	hash.Write(data)
+	return fmt.Sprintf("%x", hash.Sum(nil))
 }
 
 func createUpload(client httpclient.AuroraHttpClient, account *accounts.Account, payload map[string]interface{}) (uploadMetaResponse, int, error) {

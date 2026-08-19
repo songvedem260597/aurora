@@ -341,6 +341,7 @@ type ContinueInfo struct {
 type HandlerResult struct {
 	Text              string
 	ThinkingText      string
+	UpstreamError     string
 	ConversationID    string
 	ParentMessageID   string
 	Sentinel          []map[string]interface{}

@@ -128,12 +128,12 @@ func HandlerDetailedWithWebsocket(c *gin.Context, response *http.Response, clien
 
 // HandlerDetailedOptions 是 HandlerDetailedWithOptions 的可选参数。
 type HandlerDetailedOptions struct {
-	Websocket        *websocket.Conn
-	ClientState      *ChatClientState
-	ArtifactDelivery string
-	ProxyURL         string
-	Tools            []official_types.Tool
-	DebugSSE         bool
+	Websocket            *websocket.Conn
+	ClientState          *ChatClientState
+	ArtifactDelivery     string
+	ProxyURL             string
+	Tools                []official_types.Tool
+	ReturnUpstreamErrors bool
 }
 
 // HandlerDetailedWithOptions 处理对话响应流（最完整版）。
@@ -284,7 +284,7 @@ readLoop:
 				continue
 			}
 			streamEvent, ok := parseConversationEvent(line, &patchState, model)
-			if os.Getenv("DEBUG_SSE") != "" || options.DebugSSE {
+			if os.Getenv("DEBUG_SSE") != "" {
 				debugText := streamEvent.text
 				debugSrc := "chunk"
 				if streamEvent.response.Message.ID != "" {
@@ -428,6 +428,9 @@ readLoop:
 			}
 			original_response = streamEvent.response
 			if original_response.Error != nil {
+				if options.ReturnUpstreamErrors {
+					return HandlerResult{UpstreamError: upstreamErrorMessage(original_response.Error)}
+				}
 				c.JSON(500, gin.H{"error": original_response.Error})
 				return HandlerResult{}
 			}
@@ -609,4 +612,25 @@ readLoop:
 			ParentID:       original_response.Message.ID,
 		},
 	}
+}
+
+func upstreamErrorMessage(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return strings.TrimSpace(text)
+	}
+	if object, ok := value.(map[string]interface{}); ok {
+		for _, key := range []string{"message", "detail", "error"} {
+			if text, ok := object[key].(string); ok && strings.TrimSpace(text) != "" {
+				return strings.TrimSpace(text)
+			}
+		}
+	}
+	encoded, err := json.Marshal(value)
+	if err == nil {
+		return string(encoded)
+	}
+	return fmt.Sprint(value)
 }
