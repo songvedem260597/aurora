@@ -443,10 +443,19 @@ func prepareDirectInformationalAttachment(request *officialtypes.APIRequest) boo
 	if request == nil || !latestUserAttachmentAllowsTextAnswer(request.Messages) {
 		return false
 	}
+	userIndex := lastUserIndex(request.Messages)
+	if userIndex < 0 {
+		return false
+	}
 	request.Tools = nil
 	request.ToolChoice = nil
 	request.ParallelToolCalls = nil
-	request.Messages = compactUpstreamHistory(request.Messages, 8)
+	// A standalone description of the image needs only the current attached
+	// turn. Keeping OpenCode's old Build-agent system prompt and prior tool
+	// transcript can add tens of thousands of tokens to an otherwise tiny
+	// vision request. Requests that ask to edit/build from the image never enter
+	// this branch, so their workspace context remains intact.
+	request.Messages = []officialtypes.APIMessage{request.Messages[userIndex]}
 	return true
 }
 

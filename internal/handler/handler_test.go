@@ -445,6 +445,9 @@ func TestPrepareDirectInformationalAttachmentPreservesStreamingImage(t *testing.
 	if len(request.Tools) != 0 || request.ToolChoice != nil || request.ParallelToolCalls != nil {
 		t.Fatalf("host tool protocol was not removed: %#v", request)
 	}
+	if len(request.Messages) != 1 || request.Messages[0].Role != "user" {
+		t.Fatalf("direct image answer retained unrelated history: %#v", request.Messages)
+	}
 	if len(request.Messages[len(request.Messages)-1].Files()) != 1 {
 		t.Fatal("direct streaming request dropped the attached image")
 	}
