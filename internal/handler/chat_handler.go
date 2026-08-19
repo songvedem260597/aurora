@@ -680,7 +680,8 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 		maxRefusalRetries = 3
 	}
 
-	baseTranslated, err := chatgptrequestconverter.ConvertAPIRequest(*originalRequest, account, *proxyUrl, *client)
+	upstreamRequest, informationalAttachment := toolUpstreamRequest(originalRequest)
+	baseTranslated, err := chatgptrequestconverter.ConvertAPIRequest(upstreamRequest, account, *proxyUrl, *client)
 	if err != nil {
 		respondRequestConversionError(c, err)
 		return
@@ -740,7 +741,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			writeToolProgressSSE(c, *reqModel, "↻ Lượt trước chưa chạy tool thật — đang ép chọn lại tool/lệnh...")
 		}
 		translated := baseTranslated
-		if len(tools) > 0 {
+		if len(tools) > 0 && !informationalAttachment {
 			translated.AddMessage("user", "\n\n[HOST AGENT SEMANTIC CONTRACT: Infer the latest user's intent from the meaning of the FULL conversation, not from keywords. Start your response with EXACTLY ONE hidden intent marker. Use <agent_intent>action</agent_intent> when the user wants any real host/workspace action (including implicit follow-ups that refer to an artifact created earlier); immediately follow it with the appropriate <tool_call> block(s) and no planning prose. Use <agent_intent>answer</agent_intent> when the user only wants information, explanation, opinion, clarification, or analysis/description of content already attached in the latest turn; follow it with the complete answer in normal text and do not call tools. Client-generated helper text saying an attachment/file was read or loaded is preprocessing context, not a user request for host execution. Never reply with a future promise such as 'I will...' instead of acting or answering now.]")
 		}
 		if requireToolCall {
@@ -771,7 +772,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 			}
 			translated.AddMessage("user", retrySuffix)
 		} else if visionRetry {
-			translated.AddMessage("user", "\n\n[HOST VISION RETRY: The latest user turn already contains an image attachment that was successfully uploaded and included in this request. Inspect that attached image directly and answer the user's image question from the visual content. Do not claim that image input is unsupported, unavailable, unreadable, or missing unless the request itself returns a real attachment/file error. Start with <agent_intent>answer</agent_intent> and then answer normally. Do not call a host tool just to inspect an attachment that is already present.]")
+			translated.AddMessage("user", "\n\n[HOST VISION RETRY: The latest user turn already contains an image attachment that was successfully uploaded and included in this request. Inspect that attached image directly and answer the user's image question from the visual content. Do not claim that image input is unsupported, unavailable, unreadable, or missing unless the request itself returns a real attachment/file error. Answer normally in text and do not output an internal intent marker. Do not call a host tool just to inspect an attachment that is already present.]")
 		} else if completionRetry {
 			translated.AddMessage("user", "\n\n[HOST COMPLETION RETRY: The required host tool work has already completed and was verified. Your previous response contained only an internal intent marker. Start with <agent_intent>answer</agent_intent> and then give the user a concise final summary of the completed work. Do not call another tool and do not output an empty answer.]")
 		} else if semanticRetry {

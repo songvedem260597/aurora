@@ -404,6 +404,26 @@ func latestUserAttachmentAllowsTextAnswer(messages []officialtypes.APIMessage) b
 		!conversationRequiresContentWork(messages)
 }
 
+// toolUpstreamRequest removes the emulated host-tool protocol for a turn that
+// only asks the model to inspect an already-attached image. OpenCode includes
+// its tool definitions on ordinary answer turns too; forwarding the large tool
+// prompt for a pure vision question can make the upstream model emit only an
+// intent marker or claim the attachment is unavailable. Requests that ask to
+// edit code/files based on an image still retain their tools.
+func toolUpstreamRequest(request *officialtypes.APIRequest) (officialtypes.APIRequest, bool) {
+	if request == nil {
+		return officialtypes.APIRequest{}, false
+	}
+	prepared := *request
+	if !latestUserAttachmentAllowsTextAnswer(request.Messages) {
+		return prepared, false
+	}
+	prepared.Tools = nil
+	prepared.ToolChoice = nil
+	prepared.ParallelToolCalls = nil
+	return prepared, true
+}
+
 func latestUserHasAttachment(messages []officialtypes.APIMessage) bool {
 	i := lastUserIndex(messages)
 	if i < 0 {

@@ -321,6 +321,55 @@ func TestAttachedImageQuestionDoesNotForceHostToolFromSemanticActionMarker(t *te
 	}
 }
 
+func TestInformationalAttachmentStripsToolProtocolFromUpstreamRequest(t *testing.T) {
+	parallel := true
+	choice := &officialtypes.ToolChoice{Type: "auto"}
+	original := &officialtypes.APIRequest{
+		Tools:             []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		ToolChoice:        choice,
+		ParallelToolCalls: &parallel,
+		Messages: []officialtypes.APIMessage{{
+			Role: "user",
+			Content: officialtypes.MessageContent{Parts: []officialtypes.MessageContentPart{
+				{Type: "text", Text: "ảnh gì đây"},
+				{Type: "file", URL: "data:image/jpeg;base64,/9j/4AAQ", Mime: "image/jpeg", FileName: `C:\\Users\\uchih\\Downloads\\photo.jpg`},
+			}},
+		}},
+	}
+
+	prepared, informational := toolUpstreamRequest(original)
+	if !informational {
+		t.Fatal("direct OpenCode image question should use informational attachment mode")
+	}
+	if len(prepared.Tools) != 0 || prepared.ToolChoice != nil || prepared.ParallelToolCalls != nil {
+		t.Fatalf("tool protocol leaked into informational vision request: %#v", prepared)
+	}
+	if len(original.Tools) != 1 || original.ToolChoice != choice || original.ParallelToolCalls == nil {
+		t.Fatal("preparing the upstream request must not mutate the original OpenCode request")
+	}
+}
+
+func TestAttachmentMutationKeepsToolProtocolInUpstreamRequest(t *testing.T) {
+	original := &officialtypes.APIRequest{
+		Tools: []officialtypes.Tool{{Type: "function", Function: officialtypes.ToolFunction{Name: "bash"}}},
+		Messages: []officialtypes.APIMessage{{
+			Role: "user",
+			Content: officialtypes.MessageContent{Parts: []officialtypes.MessageContentPart{
+				{Type: "image_url", ImageURL: &officialtypes.ImageURLDetail{URL: "data:image/png;base64,iVBORw0KGgo="}},
+				{Type: "text", Text: "Sửa giao diện trong workspace giống screenshot này."},
+			}},
+		}},
+	}
+
+	prepared, informational := toolUpstreamRequest(original)
+	if informational {
+		t.Fatal("a screenshot-based workspace edit must not enter answer-only vision mode")
+	}
+	if len(prepared.Tools) != 1 || prepared.Tools[0].Function.Name != "bash" {
+		t.Fatalf("workspace mutation lost its host tools: %#v", prepared.Tools)
+	}
+}
+
 func TestAttachedImageMutationStillRequiresHostTool(t *testing.T) {
 	messages := []officialtypes.APIMessage{{
 		Role: "user",
