@@ -272,6 +272,25 @@ func TestConversationRequestsActionDoesNotForceExplanation(t *testing.T) {
 	}
 }
 
+func TestAttachedImageQuestionDoesNotForceHostToolFromSemanticActionMarker(t *testing.T) {
+	messages := []officialtypes.APIMessage{{
+		Role: "user",
+		Content: officialtypes.MessageContent{Parts: []officialtypes.MessageContentPart{
+			{Type: "text", Text: `Called the Read tool with the following input: {"filePath":"C:\\Users\\user\\Downloads\\photo.jpg"}`},
+			{Type: "text", Text: "Image read successfully"},
+			{Type: "file", Mime: "image/jpeg", FileName: "photo.jpg", URL: "data:image/jpeg;base64,/9j/4AAQ"},
+			{Type: "text", Text: "Ảnh này là ảnh gì? Trả lời ngắn gọn."},
+		}},
+	}}
+
+	if !latestUserHasAttachment(messages) {
+		t.Fatal("OpenCode image turn should be recognized as containing an attachment")
+	}
+	if agentIntentRequiresTool(agentIntentAction, messages) {
+		t.Fatal("an already-attached image question must not be escalated into a host tool requirement")
+	}
+}
+
 func TestDeferredResponseRequiresToolForImplicitContentFollowup(t *testing.T) {
 	messages := []officialtypes.APIMessage{
 		{Role: "user", Content: officialtypes.MessageContent{TextValue: "tạo game bắn máy bay pixel bằng html trên desktop"}},

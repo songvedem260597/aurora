@@ -365,7 +365,31 @@ func parseAgentIntent(text string) (string, string) {
 // the upstream model classifies the latest turn as action vs. answer, while
 // the server only verifies the structural fact that no tool has run yet.
 func agentIntentRequiresTool(intent string, messages []officialtypes.APIMessage) bool {
-	return intent == agentIntentAction && !hasToolCallSinceLastUser(messages)
+	if intent != agentIntentAction || hasToolCallSinceLastUser(messages) {
+		return false
+	}
+	// OpenCode represents an uploaded image/file as synthetic helper text plus
+	// an inline file part in the same user turn. The helper text can make an
+	// upstream semantic classifier think "Read tool" means the user requested
+	// host execution, even though the attachment is already available to the
+	// model. Treat attachment-only inspection as an answer task unless the
+	// actual turn independently carries a host action/mutation/content signal.
+	if latestUserHasAttachment(messages) &&
+		!userExplicitlyRequestsTool(messages) &&
+		!conversationRequestsAction(messages) &&
+		!conversationRequestsMutation(messages) &&
+		!conversationRequiresContentWork(messages) {
+		return false
+	}
+	return true
+}
+
+func latestUserHasAttachment(messages []officialtypes.APIMessage) bool {
+	i := lastUserIndex(messages)
+	if i < 0 {
+		return false
+	}
+	return len(messages[i].Files()) > 0
 }
 
 func incompleteAgentResponse(text string) bool {
