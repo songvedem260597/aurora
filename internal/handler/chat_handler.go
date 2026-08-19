@@ -692,11 +692,11 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	}
 	progressStarted := false
 	if streamRequested {
-		status := "⏳ Waiting for Aurora..."
+		status := "⏳ Aurora đang xử lý yêu cầu..."
 		if len(originalRequest.Messages) > 0 && originalRequest.Messages[len(originalRequest.Messages)-1].IsToolResult() {
-			status = "✅ Previous tool finished — checking the real result and deciding the next step..."
+			status = "✅ Tool vừa chạy xong — Aurora đang đọc kết quả thật và chọn bước tiếp theo..."
 		} else if requireToolCall {
-			status = "⏳ Action task detected — waiting for Aurora to choose a real tool..."
+			status = "⏳ Đây là task cần thao tác thật — Aurora đang chọn tool/lệnh để chạy..."
 		}
 		beginToolProgressSSE(c, *reqModel, status)
 		progressStarted = true
@@ -712,7 +712,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 
 	for attempt := 0; attempt < maxRefusalRetries; attempt++ {
 		if progressStarted && attempt > 0 {
-			writeToolProgressSSE(c, *reqModel, "↻ Previous response did not execute a real tool — retrying tool selection...")
+			writeToolProgressSSE(c, *reqModel, "↻ Lượt trước chưa chạy tool thật — đang ép chọn lại tool/lệnh...")
 		}
 		translated := baseTranslated
 		if attempt > 0 || requireToolCall {
@@ -830,7 +830,7 @@ func (h *ChatHandler) handleToolCalling(c *gin.Context, originalRequest *officia
 	outputTokens := util.CountToken(lastText)
 	if streamRequested {
 		if progressStarted {
-			writeToolProgressSSE(c, *reqModel, "✅ No more tools required — finishing the response...")
+			writeToolProgressSSE(c, *reqModel, "✅ Đã đủ bước thao tác/kiểm tra — đang trả kết quả cuối...")
 		}
 		writeToolCallingSSE(c, lastText, nil, *reqModel, lastConversationID, progressStarted)
 		return
@@ -893,16 +893,18 @@ func beginToolProgressSSE(c *gin.Context, model, status string) {
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
-	chunk := officialtypes.ChatCompletionChunk{
+	roleChunk := officialtypes.ChatCompletionChunk{
 		ID: "chatcmpl-QXlha2FBbmROaXhpZUFyZUF3ZXNvbWUK", Object: "chat.completion.chunk", Created: 0, Model: model,
-		Choices: []officialtypes.Choices{{Index: 0, Delta: officialtypes.Delta{Role: "assistant", ReasoningContent: status + "\n"}}},
+		Choices: []officialtypes.Choices{{Index: 0, Delta: officialtypes.Delta{Role: "assistant"}}},
 	}
+	c.Writer.WriteString("data: " + roleChunk.String() + "\n\n")
+	chunk := officialtypes.NewChatCompletionChunk(status+"\n", model)
 	c.Writer.WriteString("data: " + chunk.String() + "\n\n")
 	c.Writer.Flush()
 }
 
 func writeToolProgressSSE(c *gin.Context, model, status string) {
-	chunk := officialtypes.NewReasoningChunk(status+"\n", model)
+	chunk := officialtypes.NewChatCompletionChunk(status+"\n", model)
 	c.Writer.WriteString("data: " + chunk.String() + "\n\n")
 	c.Writer.Flush()
 }
@@ -914,13 +916,56 @@ func writeToolErrorSSE(c *gin.Context, message string) {
 }
 func toolProgressSummary(calls []officialtypes.ToolCall) string {
 	if len(calls) == 0 {
-		return "🔧 Tool requested"
+		return "🔧 Aurora đã yêu cầu chạy tool"
 	}
 	parts := make([]string, 0, len(calls))
 	for _, call := range calls {
-		parts = append(parts, "🔧 Tool requested: "+call.Function.Name+" — command/target is shown in the tool row below")
+		parts = append(parts, visibleToolProgress(call))
 	}
 	return strings.Join(parts, "\n")
+}
+
+func visibleToolProgress(call officialtypes.ToolCall) string {
+	name := call.Function.Name
+	args := map[string]interface{}{}
+	_ = json.Unmarshal([]byte(call.Function.Arguments), &args)
+	for _, key := range []string{"command", "filePath", "path", "workdir", "name"} {
+		if raw, ok := args[key]; ok {
+			value := strings.TrimSpace(fmt.Sprint(raw))
+			if value == "" {
+				continue
+			}
+			lower := strings.ToLower(value)
+			for _, secretWord := range []string{"authorization:", "bearer ", "access_token", "api_key", "apikey", "password", "secret"} {
+				if strings.Contains(lower, secretWord) {
+					return "🔧 " + name + ": <lệnh có dữ liệu nhạy cảm — đã ẩn>"
+				}
+			}
+			if len(value) > 420 {
+				value = value[:420] + "…"
+			}
+			return "🔧 " + name + ": `" + strings.ReplaceAll(value, "`", "'") + "`"
+		}
+	}
+	if raw, ok := args["patchText"]; ok {
+		patch := fmt.Sprint(raw)
+		targets := make([]string, 0, 4)
+		for _, line := range strings.Split(patch, "\n") {
+			line = strings.TrimSpace(line)
+			for _, prefix := range []string{"*** Add File:", "*** Update File:", "*** Delete File:"} {
+				if strings.HasPrefix(line, prefix) {
+					targets = append(targets, strings.TrimSpace(strings.TrimPrefix(line, prefix)))
+				}
+			}
+			if len(targets) >= 4 {
+				break
+			}
+		}
+		if len(targets) > 0 {
+			return "🔧 " + name + ": " + strings.Join(targets, ", ")
+		}
+	}
+	return "🔧 " + name + ": đang thực thi"
 }
 func (h *ChatHandler) ChatGPTConversation(c *gin.Context) {
 	var original_request chatgpt_types.ChatGPTRequest
