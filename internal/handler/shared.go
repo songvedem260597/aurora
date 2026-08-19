@@ -369,7 +369,7 @@ func toolCallMutatesWorkspace(call officialtypes.ToolCallRef) bool {
 		return false
 	}
 	args := strings.ToLower(call.Function.Arguments)
-	markers := []string{"set-content", "add-content", "out-file", "new-item", "copy-item", "move-item", "remove-item", "rename-item", "mkdir ", "touch ", "tee ", "cat >", "cat >>", ">>", "cp ", "mv ", "rm ", "del ", "npm install", "pnpm add", "yarn add", "pip install"}
+	markers := []string{"set-content", "add-content", "out-file", "new-item", "copy-item", "move-item", "remove-item", "rename-item", "mkdir ", "touch ", "tee ", "cat >", "cat >>", " > ", ">>", "writealltext", "writeallbytes", "cp ", "mv ", "rm ", "del ", "npm install", "pnpm add", "yarn add", "pip install"}
 	for _, marker := range markers {
 		if strings.Contains(args, marker) {
 			return true

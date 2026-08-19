@@ -228,6 +228,21 @@ func TestMutationTaskAllowsFinalAfterWrite(t *testing.T) {
 
 // ─── Test: original_requestHasFiles ──────────────────────────────
 
+func TestBashMutationDetection(t *testing.T) {
+	redirect := officialtypes.ToolCallRef{}
+	redirect.Function.Name = "bash"
+	redirect.Function.Arguments = `{"command":"printf GATE_OK > C:\\Users\\uchih\\Desktop\\probe.txt"}`
+	if !toolCallMutatesWorkspace(redirect) {
+		t.Fatal("shell redirection must count as mutation")
+	}
+
+	writeAllText := officialtypes.ToolCallRef{}
+	writeAllText.Function.Name = "bash"
+	writeAllText.Function.Arguments = `{"command":"powershell -Command [System.IO.File]::WriteAllText('probe.txt','ok')"}`
+	if !toolCallMutatesWorkspace(writeAllText) {
+		t.Fatal("WriteAllText must count as mutation")
+	}
+}
 func TestOriginalRequestHasFiles(t *testing.T) {
 	req := officialtypes.APIRequest{
 		Messages: []officialtypes.APIMessage{
