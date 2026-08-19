@@ -273,21 +273,49 @@ func TestConversationRequestsActionDoesNotForceExplanation(t *testing.T) {
 }
 
 func TestAttachedImageQuestionDoesNotForceHostToolFromSemanticActionMarker(t *testing.T) {
+	// This is the OpenAI-compatible wire shape produced by OpenCode after its
+	// local Read helper turns --file into an inline image_url.
+	body := `{"role":"user","content":[` +
+		`{"type":"text","text":"Called the Read tool with the following input"},` +
+		`{"type":"text","text":"Image read successfully"},` +
+		`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,/9j/4AAQ"}},` +
+		`{"type":"text","text":"Ảnh này là ảnh gì? Trả lời ngắn gọn."}]}`
+	var latest officialtypes.APIMessage
+	if err := json.Unmarshal([]byte(body), &latest); err != nil {
+		t.Fatalf("decode OpenCode image message: %v", err)
+	}
+
+	// An informational image question must not inherit the mutation gate from
+	// earlier coding work merely because it shares a long-running session.
+	writeCall := officialtypes.ToolCallRef{ID: "call_write", Type: "function"}
+	writeCall.Function.Name = "apply_patch"
+	writeCall.Function.Arguments = `{"patchText":"*** Begin Patch"}`
+	messages := []officialtypes.APIMessage{
+		{Role: "user", Content: officialtypes.MessageContent{TextValue: "tạo game html"}},
+		{Role: "assistant", ToolCalls: []officialtypes.ToolCallRef{writeCall}},
+		{Role: "tool", ToolCallID: "call_write", Content: officialtypes.MessageContent{TextValue: "Done!"}},
+		latest,
+	}
+
+	if !latestUserHasAttachment(messages) {
+		t.Fatal("OpenCode image_url turn should be recognized as containing an attachment")
+	}
+	if agentIntentRequiresTool(agentIntentAction, messages) {
+		t.Fatal("an already-attached image question must not inherit a mandatory host tool requirement")
+	}
+}
+
+func TestAttachedImageMutationStillRequiresHostTool(t *testing.T) {
 	messages := []officialtypes.APIMessage{{
 		Role: "user",
 		Content: officialtypes.MessageContent{Parts: []officialtypes.MessageContentPart{
-			{Type: "text", Text: `Called the Read tool with the following input: {"filePath":"C:\\Users\\user\\Downloads\\photo.jpg"}`},
-			{Type: "text", Text: "Image read successfully"},
-			{Type: "file", Mime: "image/jpeg", FileName: "photo.jpg", URL: "data:image/jpeg;base64,/9j/4AAQ"},
-			{Type: "text", Text: "Ảnh này là ảnh gì? Trả lời ngắn gọn."},
+			{Type: "image_url", ImageURL: &officialtypes.ImageURLDetail{URL: "data:image/png;base64,iVBORw0KGgo="}},
+			{Type: "text", Text: "Edit this image and save the result in the workspace."},
 		}},
 	}}
 
-	if !latestUserHasAttachment(messages) {
-		t.Fatal("OpenCode image turn should be recognized as containing an attachment")
-	}
-	if agentIntentRequiresTool(agentIntentAction, messages) {
-		t.Fatal("an already-attached image question must not be escalated into a host tool requirement")
+	if !agentIntentRequiresTool(agentIntentAction, messages) {
+		t.Fatal("an attachment must not bypass tools when the user actually requests a workspace mutation")
 	}
 }
 
